@@ -1,0 +1,40 @@
+[project]
+name = "emptor"
+version = "0.1.0"
+description = "Emptor - the autonomous shopper agent of the Mercatus project"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.28.1",
+    "mcp>=2.0.0",
+    "python-dotenv>=1.2.3",
+    "fides",
+]
+
+[dependency-groups]
+dev = [
+    "pip-audit>=2.10.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[project.scripts]
+emptor = "emptor.run:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv.sources]
+fides = { path = "../Fides", editable = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/emptor"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-m 'not live'"
+markers = [
+    "live: requires a real NIM_API_KEY and/or a running MCP shop server (T3, manual/pre-demo only)",
+]

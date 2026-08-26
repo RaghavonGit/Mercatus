@@ -1,0 +1,30 @@
+[
+  {
+    "id": "sku-101",
+    "name": "Mechanical Keyboard",
+    "price_inr": 3200,
+    "in_stock": true,
+    "description": "Compact 65% mechanical keyboard with hot-swappable switches.",
+    "category": "electronics"
+  },
+  {
+    "id": "sku-102",
+    "name": "USB-C Hub",
+    "price_inr": 1450,
+    "in_stock": true,
+    "category": "electronics"
+  },
+  {
+    "id": "sku-103",
+    "name": "Discontinued Webcam",
+    "price_inr": 999,
+    "in_stock": false
+  },
+  {
+    "id": "sku-104",
+    "name": "Desk Mat",
+    "price_inr": 650,
+    "in_stock": true,
+    "description": "900x400mm, non-slip base."
+  }
+]

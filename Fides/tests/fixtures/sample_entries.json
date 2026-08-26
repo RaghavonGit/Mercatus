@@ -1,0 +1,53 @@
+[
+  {
+    "seq": 1,
+    "timestamp": "2026-08-25T10:00:00+00:00",
+    "actor": "emptor",
+    "event_type": "goal_received",
+    "data": {
+      "goal": "birthday gift for a friend who likes hiking",
+      "budget_inr": 1500
+    },
+    "prev_hash": null,
+    "entry_hash": "1939e91b59597aaacdc7eab65730229f5ba798dc50b6a8f51c1b1ee982470387"
+  },
+  {
+    "seq": 2,
+    "timestamp": "2026-08-25T10:00:05+00:00",
+    "actor": "mercator",
+    "event_type": "catalog_retrieved",
+    "data": {
+      "count": 12
+    },
+    "prev_hash": "1939e91b59597aaacdc7eab65730229f5ba798dc50b6a8f51c1b1ee982470387",
+    "entry_hash": "3cfcffe56861de0d264975db9598b4529a30aaf5cf896000e9edeaa3cfe18067"
+  },
+  {
+    "seq": 3,
+    "timestamp": "2026-08-25T10:00:11+00:00",
+    "actor": "mercator",
+    "event_type": "guardrail_check",
+    "data": {
+      "check": "price_bound",
+      "passed": true,
+      "reason": null,
+      "detail": null
+    },
+    "prev_hash": "3cfcffe56861de0d264975db9598b4529a30aaf5cf896000e9edeaa3cfe18067",
+    "entry_hash": "6ed35334a9f97ed5a42c93d0d537ac2ab38a764fc896207eaa8dc2255da43219"
+  },
+  {
+    "seq": 4,
+    "timestamp": "2026-08-25T10:00:14+00:00",
+    "actor": "mercator",
+    "event_type": "checkout_result",
+    "data": {
+      "cart_id": "cart_demo001",
+      "idempotency_key": "idem_demo001",
+      "ok": true,
+      "reason": null
+    },
+    "prev_hash": "6ed35334a9f97ed5a42c93d0d537ac2ab38a764fc896207eaa8dc2255da43219",
+    "entry_hash": "d0e6b5eb4cb5b5c8cd3bfc41a4afb0db98a5f0a3579867ce60bee12e2c2d79dd"
+  }
+]

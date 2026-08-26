@@ -1,0 +1,8 @@
+[
+  {"id": "sku-001", "name": "Notebook - A5 Ruled", "price_inr": 120, "in_stock": true, "category": "stationery"},
+  {"id": "sku-002", "name": "Ballpoint Pen (Pack of 5)", "price_inr": 80, "in_stock": true, "category": "stationery"},
+  {"id": "sku-003", "name": "Desk Lamp", "price_inr": 899, "in_stock": true, "category": "electronics"},
+  {"id": "sku-004", "name": "Wireless Mouse", "price_inr": 650, "in_stock": false, "category": "electronics"},
+  {"id": "sku-005", "name": "Premium Leather Diary", "price_inr": 2200, "in_stock": true, "category": "stationery"},
+  {"id": "sku-006", "name": "Sticky Notes Set", "price_inr": 60, "in_stock": true, "category": "stationery"}
+]

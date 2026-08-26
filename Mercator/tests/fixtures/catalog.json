@@ -1,0 +1,56 @@
+[
+  {
+    "id": "prod_001",
+    "name": "The Hobbit",
+    "price_inr": 450,
+    "in_stock": true,
+    "category": "books",
+    "description": "A fantasy novel by J.R.R. Tolkien.",
+    "stock": 12
+  },
+  {
+    "id": "prod_002",
+    "name": "Wooden Building Blocks",
+    "price_inr": 899,
+    "in_stock": true,
+    "category": "toys",
+    "description": "40-piece natural wood block set.",
+    "stock": 5
+  },
+  {
+    "id": "prod_003",
+    "name": "Fountain Pen",
+    "price_inr": 1200,
+    "in_stock": true,
+    "category": "stationery",
+    "description": "Stainless steel nib, converter included.",
+    "stock": 8
+  },
+  {
+    "id": "prod_004",
+    "name": "Settlers Board Game",
+    "price_inr": 2400,
+    "in_stock": true,
+    "category": "toys",
+    "description": "Strategy board game for 3-4 players. Priced above the default spend cap for testing.",
+    "stock": 3
+  },
+  {
+    "id": "prod_005",
+    "name": "Recycled Notebook",
+    "price_inr": 150,
+    "in_stock": false,
+    "category": "stationery",
+    "description": "A5 notebook, recycled paper. Currently out of stock.",
+    "stock": 0
+  },
+  {
+    "id": "prod_006",
+    "name": "Bluetooth Speaker",
+    "price_inr": 3500,
+    "in_stock": true,
+    "category": "electronics",
+    "description": "Portable speaker. Category is not on the default allowlist, for testing.",
+    "stock": 10
+  }
+]

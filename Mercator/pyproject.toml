@@ -1,0 +1,36 @@
+[project]
+name = "mercator"
+version = "0.1.0"
+description = "Mercator - the merchant agent of the Mercatus project"
+readme = "README.md"
+authors = [
+    { name = "RaghavonGit", email = "raghavnagalingaayyanar@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "mcp==2.0.0",
+    "python-dotenv>=1.2.3",
+    "razorpay>=2.0.1",
+    "fides",
+]
+
+[project.scripts]
+mercator = "mercator.server:main"
+
+[build-system]
+requires = ["uv_build>=0.11.7,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+fides = { path = "../Fides", editable = true }
+
+[dependency-groups]
+dev = [
+    "pip-audit>=2.10.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

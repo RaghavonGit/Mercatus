@@ -1,0 +1,41 @@
+# Environment / secrets
+**/.env
+**/*.env.local
+
+# Python
+**/__pycache__/
+**/*.py[oc]
+**/*.pyc
+**/.venv/
+**/venv/
+**/build/
+**/dist/
+**/wheels/
+**/*.egg-info/
+**/.pytest_cache/
+
+# Databases
+**/*.db
+**/*.db-journal
+**/*.db-wal
+**/*.db-shm
+**/*.sqlite
+
+# Claude / agent tooling artifacts
+**/.claude/
+**/.superpowers/
+
+# Backed-up per-project git history (see .git.bak folders)
+**/.git.bak/
+
+# Internal AI-assistant build-diary docs (kept locally, not published)
+Emptor/CLAUDE.md
+Emptor/Docu.md
+Emptor/finished_emptor.md
+Mercator/CLAUDE.md
+Mercator/finished_mercator.md
+Fides/CLAUDE.md
+
+# OS
+.DS_Store
+Thumbs.db
