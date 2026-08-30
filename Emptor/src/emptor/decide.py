@@ -7,7 +7,13 @@ import httpx
 from emptor.filters import Product
 
 NIM_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-NIM_MODEL = "nvidia/llama-3.3-nemotron-super-49b-v1"
+# nvidia/llama-3.3-nemotron-super-49b-v1 reached end-of-life 2026-08-26 (HTTP
+# 410 from NIM) and was replaced with the Nemotron 3 generation. Verified
+# live against the account's actual /v1/models list, 2026-08-31. Nemotron 3
+# models emit chain-of-thought into `message.content` by default (breaks the
+# raw_decode() JSON parsing below) unless `chat_template_kwargs.thinking` is
+# explicitly set to false - see the request body below.
+NIM_MODEL = "nvidia/nemotron-3-nano-30b-a3b"
 
 SYSTEM_PROMPT = (
     "You are a shopping assistant for an autonomous purchasing agent. "
@@ -53,6 +59,7 @@ async def decide(
                 "model": NIM_MODEL,
                 "temperature": 0.0,
                 "max_tokens": 1024,
+                "chat_template_kwargs": {"thinking": False},
                 "messages": [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": f"GOAL: {goal}\nBUDGET_INR: {budget_inr}"},

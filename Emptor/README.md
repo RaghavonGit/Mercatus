@@ -68,6 +68,26 @@ implements the three-tool contract above, backed by
 `tests/fixtures/mock_catalog.json`, so Steps 1/2/6 can be proven against a
 real MCP connection before Mercator exists.
 
+### Running against the real Mercator
+
+Emptor has also been run live against the real [Mercator](../Mercator/)
+package — real MCP connection, real NIM decision, real Razorpay test-mode
+order, real [Fides](../Fides/) ledger. Start Mercator with
+`MCP_TRANSPORT=streamable-http` in its `.env` (see its README), then:
+
+```bash
+# PowerShell
+$env:MERCATOR_ENDPOINT = "http://127.0.0.1:8000/mcp"
+uv run emptor "a fantasy novel to read" --budget 500
+```
+
+**Known gap**: pick a goal that resolves to exactly **one** product.
+Mercator's cart is single-item-only (each `add_to_cart` opens its own fresh
+cart), and this pipeline has no way to check out more than one such cart in
+a single order yet — a multi-item pick against Mercator fails loudly with a
+clear `PurchaseError` rather than silently doing the wrong thing. This is an
+open design question, not a bug; see `CLAUDE.md` section 10.
+
 ```bash
 # terminal 1
 uv run python tests/stub_shop/server.py

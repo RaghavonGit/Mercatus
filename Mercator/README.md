@@ -12,26 +12,28 @@ Zero LLM calls. Every guardrail is deterministic, server-side, fail-closed.
 All core modules are built and tested: guardrails, idempotency, catalog
 sanitization, cart, config, payments, ledger, and the MCP server itself
 (three tools: `list_products`, `add_to_cart`, `checkout`). 196 tests passing.
-See `CLAUDE.md` section 16 for the full build status table.
 
-Payments have been verified against the **real** Razorpay test-mode API
-(not just mocks) — order creation, amount echoing, and idempotency (no
-double-charge on a replayed key) all confirmed live. The server has also
-been tested through a real MCP client over an actual stdio subprocess (the
-official MCP Inspector, and a raw `ClientSession`) — this caught and fixed
-a real output-schema bug (see `CLAUDE.md` section 15, 2026-08-25) that
-in-process testing alone had missed.
+- **Payments**: verified against the **real** Razorpay test-mode API (not
+  just mocks) — order creation, amount echoing, and idempotency (no
+  double-charge on a replayed key) all confirmed live.
+- **Real MCP client**: tested over an actual stdio subprocess (the official
+  MCP Inspector, and a raw `ClientSession`) — caught and fixed a real
+  output-schema bug that in-process testing alone had missed.
+- **Security audit**: a full-codebase pass found and fixed 7 issues,
+  including a real overselling bug (stock was never re-verified or reserved
+  at checkout) and a real concurrency race (two checkouts for the last unit
+  in stock could both succeed) — the concurrency fix was verified against a
+  real stdio subprocess racing two genuine concurrent checkout calls.
+- **End-to-end with the real Emptor agent**: run and verified live — see
+  below.
 
-A full-codebase security/correctness audit (2026-08-25) found and fixed 7
-issues, including a real overselling bug (stock was never actually
-re-verified or reserved at checkout) and a real concurrency race (two
-checkout calls for the same last-in-stock item could both succeed) — the
-concurrency fix was verified against a real stdio subprocess racing two
-genuine concurrent checkout calls, not just in-process tests. See
-`CLAUDE.md` section 15, 2026-08-25 audit entry, for the full list.
+Full history and reasoning for all of the above lives in `CLAUDE.md`
+section 15 (decision log) and section 16 (build status table).
 
-**Not yet exercised**: end-to-end testing with the actual Emptor package
-hasn't been run yet.
+**Known gap**: multi-item purchases aren't supported yet. Every
+`add_to_cart` call opens its own fresh single-item cart, and there's no way
+to check out more than one cart in a single order — see "Known limitations"
+below.
 
 ## Setup
 
@@ -46,11 +48,24 @@ cp .env.example .env   # then fill in your Razorpay TEST-mode keys
 uv run mercator
 ```
 
-Registers three MCP tools over stdio: `list_products`, `add_to_cart`,
-`checkout`. Requires a valid `.env` (see `.env.example`) — the server
-refuses to start if `RAZORPAY_KEY_ID` doesn't look like a test-mode key
-(`rzp_test_...`), or if `SPEND_CAP_INR`/`ALLOWED_CATEGORIES` are missing or
-malformed.
+Registers three MCP tools: `list_products`, `add_to_cart`, `checkout`.
+Requires a valid `.env` (see `.env.example`) — the server refuses to start
+if `RAZORPAY_KEY_ID` doesn't look like a test-mode key (`rzp_test_...`), or
+if `SPEND_CAP_INR`/`ALLOWED_CATEGORIES` are missing or malformed.
+
+**Transport**: defaults to **stdio** (what Claude Desktop, the MCP
+Inspector, and this project's own client tests use). To serve over HTTP
+instead — needed to connect a real [Emptor](../Emptor/) instance, whose
+client speaks `streamable_http_client` against a URL — set in `.env`:
+
+```
+MCP_TRANSPORT=streamable-http
+```
+
+The server then listens at `http://127.0.0.1:<MERCATOR_PORT>/mcp` (default
+port `8000`). Point Emptor's `MERCATOR_ENDPOINT` at that same URL. This has
+been run and verified live end to end — see `CLAUDE.md` section 15,
+2026-08-31 entry.
 
 ## Running the tests
 
@@ -78,5 +93,11 @@ chain hasn't been tampered with.
 
 - Idempotency store is in-memory — restarting the server loses it.
 - Spend cap is per-transaction only, not cumulative.
-- Single-item carts only, matching Emptor's current scope.
+- **Single-item carts only.** Each `add_to_cart` call opens a fresh cart for
+  exactly one product; `checkout` closes out exactly one cart. A client
+  that picks multiple distinct products (Emptor's own pipeline does) has no
+  way to check them out as a single order against this server today — this
+  was confirmed by running the real Emptor agent against this server, not
+  just assumed. Resolving it needs a decision: grow this server's cart to
+  hold multiple items, or have the client issue one order per item.
 - Payment flow stops at order creation — no capture simulation.

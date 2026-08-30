@@ -251,7 +251,17 @@ def main() -> None:
         razorpay_client=razorpay_client,
         ledger=Ledger(DEFAULT_LEDGER_PATH),
     )
-    server.run()
+
+    # Default stays stdio (Claude Desktop, MCP Inspector, section 15's
+    # verified real-client testing all target this). Emptor's client
+    # (emptor/client.py) speaks streamable_http_client against
+    # MERCATOR_ENDPOINT instead, so opt into that transport here with
+    # MCP_TRANSPORT=streamable-http when running against Emptor — see
+    # CLAUDE.md section 15, 2026-08-26 entry for the gap this closes.
+    if env.get("MCP_TRANSPORT") == "streamable-http":
+        server.run(transport="streamable-http", host="127.0.0.1", port=config.port)
+    else:
+        server.run()
 
 
 if __name__ == "__main__":

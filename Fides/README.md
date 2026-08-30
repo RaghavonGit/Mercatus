@@ -117,21 +117,26 @@ any event type, for any reason. This mirrors Emptor's and Mercator's own
 rules exactly — consistent across the whole Mercatus family. If you're
 integrating Fides into a new caller, treat this as a hard boundary.
 
-## Integration (future, separate pass)
+## Integration
 
-Fides was built and tested standalone, exactly like Emptor and Mercator were
-— see `CLAUDE.md` section 9 for the deliberate, not-yet-started integration
-plan:
+Fides was built and tested standalone first, exactly like Emptor and
+Mercator were, then wired into both — see `CLAUDE.md` section 9 for the
+full integration history.
 
-- Mercator's `ledger.py` currently writes a JSONL file directly as a
-  stand-in; it will become a thin adapter calling `fides.log_event(...)`
-  instead — the call sites in `server.py` shouldn't need to change shape.
-- Emptor doesn't call any ledger yet; integration adds `fides.log_event()`
-  calls at goal received, catalog retrieved, LLM decision, validation
-  result, and purchase outcome.
-- Suggested `event_type` vocabulary (convention only, not enforced by code):
-  `goal_received`, `catalog_retrieved`, `llm_decision`, `validation_result`,
-  `guardrail_check`, `checkout_result`, `catalog_flagged`.
+- **Mercator** calls `fides.log_event` (via a thin `ledger.py` adapter) for
+  every guardrail check and every checkout result, accepted and rejected.
+  Live-verified: a real purchase and a real server-side rejection against
+  the real Razorpay API both produced a valid, `verify_chain()`-passing
+  chain.
+- **Emptor** calls `fides.log_event` at five points: goal received, catalog
+  retrieved, LLM decision, validation result, and purchase outcome.
+- `event_type` vocabulary in use: `goal_received`, `catalog_retrieved`,
+  `llm_decision`, `validation_result`, `guardrail_check`, `checkout_result`,
+  `catalog_flagged`.
+- Each side logs to its **own** ledger file (`actor="mercator"` /
+  `actor="emptor"`) — these are two independent hash chains, not one shared
+  chain across both packages. Cross-referencing a purchase across both
+  currently means checking both files, not a single combined proof.
 
 ## Testing
 
