@@ -35,6 +35,39 @@ def check_spend_cap(cart_total_inr: int, cap_inr: int) -> GuardrailResult:
     return GuardrailResult(passed=True)
 
 
+def check_cumulative_spend_cap(
+    already_spent_inr: int, new_total_inr: int, cumulative_cap_inr: int
+) -> GuardrailResult:
+    if (
+        not isinstance(cumulative_cap_inr, int)
+        or isinstance(cumulative_cap_inr, bool)
+        or cumulative_cap_inr <= 0
+    ):
+        return GuardrailResult(
+            False, reasons.CUMULATIVE_SPEND_CAP_EXCEEDED, "No valid cumulative spend cap configured"
+        )
+    if (
+        not isinstance(already_spent_inr, int)
+        or isinstance(already_spent_inr, bool)
+        or already_spent_inr < 0
+    ):
+        return GuardrailResult(
+            False, reasons.CUMULATIVE_SPEND_CAP_EXCEEDED, "Already-spent amount is not a valid integer amount"
+        )
+    if not isinstance(new_total_inr, int) or isinstance(new_total_inr, bool) or new_total_inr < 0:
+        return GuardrailResult(
+            False, reasons.CUMULATIVE_SPEND_CAP_EXCEEDED, "New total is not a valid integer amount"
+        )
+    running_total = already_spent_inr + new_total_inr
+    if running_total > cumulative_cap_inr:
+        return GuardrailResult(
+            False,
+            reasons.CUMULATIVE_SPEND_CAP_EXCEEDED,
+            f"Cumulative total {running_total} exceeds cap {cumulative_cap_inr}",
+        )
+    return GuardrailResult(passed=True)
+
+
 def check_input(cart: dict | None) -> GuardrailResult:
     if not isinstance(cart, dict):
         return GuardrailResult(False, reasons.CART_NOT_FOUND, "No cart provided")
@@ -117,13 +150,47 @@ def run_all_guardrails(
 
 
 def check_stock(items: list[dict]) -> GuardrailResult:
+    # Aggregate quantity per product_id before comparing to stock -- two
+    # lines of the same product_id each individually <= stock can still sum
+    # past it, so checking each line independently is not enough. A
+    # genuinely single-line product still gets the original index-based
+    # message (identical to pre-fix behavior, and avoids echoing a raw
+    # client-supplied product_id into the detail on the common path); only
+    # once a product spans multiple lines does an index stop identifying a
+    # single failing line unambiguously, so the product_id is named instead.
+    seen_order: list = []
+    first_index: dict = {}
+    line_count: dict = {}
+    totals: dict = {}
+    in_stock_flags: dict = {}
+    stock_by_product: dict = {}
+
     for idx, item in enumerate(items):
-        if not item["in_stock"] or item["quantity"] > item["stock"]:
-            return GuardrailResult(
-                False,
-                reasons.OUT_OF_STOCK,
-                f"Item at index {idx} is not available in the requested quantity",
+        product_id = item.get("product_id")
+        if product_id not in totals:
+            seen_order.append(product_id)
+            first_index[product_id] = idx
+            line_count[product_id] = 0
+            totals[product_id] = 0
+            in_stock_flags[product_id] = True
+        line_count[product_id] += 1
+        totals[product_id] += item["quantity"]
+        in_stock_flags[product_id] = in_stock_flags[product_id] and bool(item["in_stock"])
+        # Fail closed on conflicting stock snapshots across lines for the
+        # same product: take the lower one rather than last-write-wins.
+        # Unreachable via cart.py today (CartStore.add_item merges same-
+        # product lines rather than duplicating them, so both lines always
+        # carry the same catalog snapshot) -- hardening for other callers.
+        stock_by_product[product_id] = min(stock_by_product.get(product_id, item["stock"]), item["stock"])
+
+    for product_id in seen_order:
+        if not in_stock_flags[product_id] or totals[product_id] > stock_by_product[product_id]:
+            detail = (
+                f"Item at index {first_index[product_id]} is not available in the requested quantity"
+                if line_count[product_id] == 1
+                else f"Product {product_id} is not available in the requested quantity"
             )
+            return GuardrailResult(False, reasons.OUT_OF_STOCK, detail)
     return GuardrailResult(passed=True)
 
 

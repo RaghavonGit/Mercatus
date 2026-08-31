@@ -5,9 +5,11 @@ supplies a ``product_id``/``quantity`` pair, never a price or stock count
 (CLAUDE.md section 4's anti-tampering rule). The cart dict this module
 produces is exactly the shape ``guardrails.run_all_guardrails`` expects.
 
-v1 scope: quantity must be exactly 1, and each ``add_to_cart`` call creates
-a fresh single-item cart (no multi-item carts yet — matches Emptor's
-current scope, CLAUDE.md section 17).
+Quantity must be a positive int. With no ``cart_id``, ``add_to_cart``
+creates a fresh single-item cart, same as before. Given an existing
+``cart_id``, it adds a line to that cart instead — merging into an
+existing line for the same ``product_id`` rather than duplicating it
+(see ``CartStore.add_item``), so a cart can accumulate multiple items.
 """
 
 import threading
@@ -87,10 +89,46 @@ class CartStore:
             self._checked_out.add(cart_id)
             self._in_progress.discard(cart_id)
 
+    def add_item(self, cart_id: str, item: dict) -> bool:
+        """Add a line to an existing, still-open cart. Never raises: any
+        cart_id that isn't a live, non-checked-out, non-mid-checkout cart
+        (checked-out, mid-checkout, evicted, or never existed) just returns
+        False, same "not found" treatment as every other lookup here."""
+        with self._lock:
+            if cart_id in self._checked_out or cart_id in self._in_progress:
+                return False
+            cart = self._carts.get(cart_id)
+            if cart is None:
+                return False
 
-def add_to_cart(catalog: list[dict], store: CartStore, product_id, quantity) -> dict:
-    if not isinstance(quantity, int) or isinstance(quantity, bool) or quantity != 1:
+            existing = next(
+                (line for line in cart["items"] if line.get("product_id") == item.get("product_id")),
+                None,
+            )
+            if existing is not None:
+                # Merge into the existing line -- never append a second line
+                # for the same product. Quantities add; snapshot fields are
+                # last-write-wins, matching add_to_cart's own "freeze
+                # current catalog values" behavior.
+                existing["quantity"] += item["quantity"]
+                for field in ("price_inr", "category", "in_stock", "stock"):
+                    if field in item:
+                        existing[field] = item[field]
+            else:
+                cart["items"].append(item)
+            return True
+
+
+def add_to_cart(catalog: list[dict], store: CartStore, product_id, quantity, cart_id=None) -> dict:
+    if not isinstance(quantity, int) or isinstance(quantity, bool) or quantity < 1:
         return {"ok": False, "reason": "INVALID_QUANTITY"}
+
+    # store.get(cart_id) first: check the cart is actually usable before
+    # doing any catalog work for it. A None result covers nonexistent,
+    # evicted, and already-checked-out carts alike (store.get() already
+    # returns None for checked-out carts).
+    if cart_id is not None and store.get(cart_id) is None:
+        return {"ok": False, "reason": "CART_NOT_FOUND"}
 
     product = next((p for p in catalog if p.get("id") == product_id), None)
     if product is None:
@@ -113,5 +151,13 @@ def add_to_cart(catalog: list[dict], store: CartStore, product_id, quantity) -> 
         "in_stock": product["in_stock"],
         "stock": available,
     }
-    cart_id = store.create([item])
+
+    if cart_id is None:
+        new_cart_id = store.create([item])
+        return {"ok": True, "cart_id": new_cart_id, "line_total": price_inr * quantity}
+
+    if not store.add_item(cart_id, item):
+        # Raced with a checkout that landed between the get() above and
+        # this add_item() call -- same CART_NOT_FOUND treatment.
+        return {"ok": False, "reason": "CART_NOT_FOUND"}
     return {"ok": True, "cart_id": cart_id, "line_total": price_inr * quantity}

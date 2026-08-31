@@ -27,6 +27,7 @@ from mercator.guardrails import (
     GuardrailResult,
     check_allowlist,
     check_cart_exists,
+    check_cumulative_spend_cap,
     check_idempotency_key_present,
     check_input,
     check_spend_cap,
@@ -181,6 +182,39 @@ def test_check_stock_quantity_greater_than_stock_rejects():
     result = check_stock(items)
     assert result.passed is False
     assert result.reason == reasons.OUT_OF_STOCK
+
+
+def test_check_stock_two_lines_same_product_summing_over_stock_rejects():
+    # Regression test: two lines of the same product_id, each individually
+    # <= stock, used to sum past it and incorrectly pass (3 + 3 against 5 in
+    # stock). check_stock must aggregate quantity per product_id before
+    # comparing to stock, not check each line independently.
+    items = [
+        {"product_id": "prod_001", "in_stock": True, "stock": 5, "quantity": 3},
+        {"product_id": "prod_001", "in_stock": True, "stock": 5, "quantity": 3},
+    ]
+    result = check_stock(items)
+    assert result.passed is False
+    assert result.reason == reasons.OUT_OF_STOCK
+    assert "prod_001" in (result.detail or "")
+
+
+def test_check_stock_two_lines_same_product_within_stock_passes():
+    items = [
+        {"product_id": "prod_001", "in_stock": True, "stock": 5, "quantity": 2},
+        {"product_id": "prod_001", "in_stock": True, "stock": 5, "quantity": 3},
+    ]
+    result = check_stock(items)
+    assert result.passed is True
+
+
+def test_check_stock_two_different_products_each_within_own_stock_passes():
+    items = [
+        {"product_id": "prod_001", "in_stock": True, "stock": 3, "quantity": 3},
+        {"product_id": "prod_002", "in_stock": True, "stock": 3, "quantity": 3},
+    ]
+    result = check_stock(items)
+    assert result.passed is True
 
 
 def test_check_input_valid_cart_passes():
@@ -430,3 +464,98 @@ def test_run_all_guardrails_prod004_alone_returns_spend_cap_exceeded():
     result = run_all_guardrails(cart, "idem-key-1", DEFAULT_CONFIG)
     assert result.passed is False
     assert result.reason == reasons.SPEND_CAP_EXCEEDED
+
+
+# --- check_cumulative_spend_cap (mirrors check_spend_cap's own tests) ----
+# Standalone pure function: already_spent_inr comes from the spend tracker
+# built in a later task, so it isn't wired into run_all_guardrails here --
+# a later task calls it directly with a real already_spent_inr value.
+
+
+def test_check_cumulative_spend_cap_under_cap_passes():
+    result = check_cumulative_spend_cap(already_spent_inr=500, new_total_inr=500, cumulative_cap_inr=1500)
+    assert result.passed is True
+
+
+def test_check_cumulative_spend_cap_exactly_at_cap_passes():
+    result = check_cumulative_spend_cap(already_spent_inr=1000, new_total_inr=500, cumulative_cap_inr=1500)
+    assert result.passed is True
+
+
+def test_check_cumulative_spend_cap_one_rupee_over_rejects():
+    result = check_cumulative_spend_cap(already_spent_inr=1000, new_total_inr=501, cumulative_cap_inr=1500)
+    assert result.passed is False
+    assert result.reason == reasons.CUMULATIVE_SPEND_CAP_EXCEEDED
+
+
+def test_check_cumulative_spend_cap_missing_cap_rejects():
+    result = check_cumulative_spend_cap(already_spent_inr=0, new_total_inr=100, cumulative_cap_inr=None)
+    assert result.passed is False
+    assert result.reason == reasons.CUMULATIVE_SPEND_CAP_EXCEEDED
+
+
+def test_check_cumulative_spend_cap_zero_cap_rejects():
+    result = check_cumulative_spend_cap(already_spent_inr=0, new_total_inr=0, cumulative_cap_inr=0)
+    assert result.passed is False
+    assert result.reason == reasons.CUMULATIVE_SPEND_CAP_EXCEEDED
+
+
+def test_check_cumulative_spend_cap_negative_cap_rejects():
+    result = check_cumulative_spend_cap(already_spent_inr=0, new_total_inr=100, cumulative_cap_inr=-5)
+    assert result.passed is False
+    assert result.reason == reasons.CUMULATIVE_SPEND_CAP_EXCEEDED
+
+
+def test_check_cumulative_spend_cap_non_int_cap_rejects():
+    result = check_cumulative_spend_cap(already_spent_inr=0, new_total_inr=100, cumulative_cap_inr="1500")
+    assert result.passed is False
+    assert result.reason == reasons.CUMULATIVE_SPEND_CAP_EXCEEDED
+
+
+def test_check_cumulative_spend_cap_bool_cap_rejects():
+    result = check_cumulative_spend_cap(already_spent_inr=0, new_total_inr=0, cumulative_cap_inr=True)
+    assert result.passed is False
+    assert result.reason == reasons.CUMULATIVE_SPEND_CAP_EXCEEDED
+
+
+def test_check_cumulative_spend_cap_non_int_already_spent_rejects():
+    result = check_cumulative_spend_cap(already_spent_inr=450.0, new_total_inr=100, cumulative_cap_inr=1500)
+    assert result.passed is False
+    assert result.reason == reasons.CUMULATIVE_SPEND_CAP_EXCEEDED
+
+
+def test_check_cumulative_spend_cap_bool_already_spent_rejects():
+    result = check_cumulative_spend_cap(already_spent_inr=True, new_total_inr=100, cumulative_cap_inr=1500)
+    assert result.passed is False
+    assert result.reason == reasons.CUMULATIVE_SPEND_CAP_EXCEEDED
+
+
+def test_check_cumulative_spend_cap_negative_already_spent_rejects():
+    result = check_cumulative_spend_cap(already_spent_inr=-1, new_total_inr=100, cumulative_cap_inr=1500)
+    assert result.passed is False
+    assert result.reason == reasons.CUMULATIVE_SPEND_CAP_EXCEEDED
+
+
+def test_check_cumulative_spend_cap_non_int_new_total_rejects():
+    result = check_cumulative_spend_cap(already_spent_inr=0, new_total_inr=450.0, cumulative_cap_inr=1500)
+    assert result.passed is False
+    assert result.reason == reasons.CUMULATIVE_SPEND_CAP_EXCEEDED
+
+
+def test_check_cumulative_spend_cap_bool_new_total_rejects():
+    result = check_cumulative_spend_cap(already_spent_inr=0, new_total_inr=True, cumulative_cap_inr=1500)
+    assert result.passed is False
+    assert result.reason == reasons.CUMULATIVE_SPEND_CAP_EXCEEDED
+
+
+def test_check_cumulative_spend_cap_negative_new_total_rejects():
+    result = check_cumulative_spend_cap(already_spent_inr=0, new_total_inr=-1, cumulative_cap_inr=1500)
+    assert result.passed is False
+    assert result.reason == reasons.CUMULATIVE_SPEND_CAP_EXCEEDED
+
+
+def test_check_cumulative_spend_cap_detail_states_sum_and_cap():
+    result = check_cumulative_spend_cap(already_spent_inr=1000, new_total_inr=600, cumulative_cap_inr=1500)
+    assert result.passed is False
+    assert "1600" in (result.detail or "")
+    assert "1500" in (result.detail or "")
