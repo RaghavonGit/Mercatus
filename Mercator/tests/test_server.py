@@ -168,6 +168,7 @@ def test_checkout_success_shape_validates_against_declared_schema():
             "payment_link_url": "https://rzp.io/i/plink_1",
             "amount": 450,
             "status": "pending",
+            "expire_hours": 6,
         },
     )
     jsonschema.validate(filled, schema)
@@ -259,6 +260,7 @@ async def test_checkout_full_success_flow(tmp_path):
     assert body["payment_link_url"] == "https://rzp.io/i/plink_1"
     assert body["amount"] == 450
     assert body["status"] == "pending"
+    assert body["expire_hours"] == 6  # DEFAULT_PAYMENT_LINK_EXPIRE_HOURS (config has None)
 
     # a pending-links entry was registered against this cart
     assert cart_id in server._pending_links

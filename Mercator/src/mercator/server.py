@@ -88,6 +88,7 @@ class CheckoutResult(TypedDict, total=False):
     payment_link_url: str | None
     amount: int | None
     status: str | None
+    expire_hours: int | None
     reason: str | None
     detail: str | None
 
@@ -316,13 +317,12 @@ def build_server(
             # All checks passed, stock is reserved. The Razorpay call
             # itself happens outside stock_lock so one slow payment doesn't
             # serialize every other checkout.
-            outcome = payments.create_payment_link(
-                razorpay_client,
-                total,
-                cart_id,
-                expire_hours=config.payment_link_expire_hours or DEFAULT_PAYMENT_LINK_EXPIRE_HOURS,
-            )
+            expire_hours = config.payment_link_expire_hours or DEFAULT_PAYMENT_LINK_EXPIRE_HOURS
+            outcome = payments.create_payment_link(razorpay_client, total, cart_id, expire_hours)
             if outcome.get("ok"):
+                # Surface the window so a client (Emptor) can tell the buyer
+                # how long they have -- it has no other way to know it.
+                outcome["expire_hours"] = expire_hours
                 with pending_lock:
                     pending_links[cart_id] = {
                         "payment_link_id": outcome["payment_link_id"],

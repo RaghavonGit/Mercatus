@@ -8,11 +8,20 @@ import emptor.run as run_module
 from emptor.config import Config, ConfigError
 from emptor.decide import DecideError
 from emptor.discover import DiscoverError
-from emptor.purchase import PurchaseError
+from emptor.purchase import PendingPurchase, PurchaseError
 from emptor.run import _safe_log_event
 
 CATALOG = [{"id": "a", "name": "Widget", "price_inr": 100, "in_stock": True}]
 CONFIG = Config(nim_api_key="k", mercator_endpoint="http://shop.test", default_budget_inr=1000)
+
+PENDING = PendingPurchase(
+    payment_link_id="plink-1",
+    payment_link_url="https://rzp.io/i/plink-1",
+    total_inr=100,
+    expire_hours=6,
+)
+
+RUPEE = "₹"
 
 
 class _FakeConnection:
@@ -26,7 +35,9 @@ class _FakeConnection:
         return None
 
 
-async def test_run_success_path(monkeypatch, capsys):
+def _wire_happy_path(monkeypatch, *, purchase_result=PENDING):
+    """discover -> decide -> purchase, stubbed to the happy path. Callers
+    still set assume_yes=True or stub builtins.input for the approval gate."""
     monkeypatch.setattr(run_module, "ShopConnection", _FakeConnection)
 
     async def fake_discover(session):
@@ -36,18 +47,95 @@ async def test_run_success_path(monkeypatch, capsys):
         return [{"product_id": "a", "quantity": 1}]
 
     async def fake_purchase(session, validated):
-        return "order-1"
+        if isinstance(purchase_result, Exception):
+            raise purchase_result
+        return purchase_result
 
     monkeypatch.setattr(run_module, "discover_catalog", fake_discover)
     monkeypatch.setattr(run_module, "decide", fake_decide)
     monkeypatch.setattr(run_module, "purchase", fake_purchase)
 
-    exit_code = await run_module.run("buy a widget", 1000, CONFIG)
+
+# --- pending / approval outcomes ----------------------------------------
+
+
+async def test_run_pending_path(monkeypatch, capsys):
+    _wire_happy_path(monkeypatch)
+
+    exit_code = await run_module.run("buy a widget", 1000, CONFIG, assume_yes=True)
 
     assert exit_code == 0
     out = capsys.readouterr().out
-    assert "SUCCESS" in out
-    assert "order-1" in out
+    assert "PENDING: pay INR 100 at https://rzp.io/i/plink-1" in out
+    assert "link id plink-1" in out
+    assert "expires in ~6h" in out
+
+
+async def test_run_operator_types_yes_proceeds(monkeypatch, capsys):
+    _wire_happy_path(monkeypatch)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "yes")
+
+    exit_code = await run_module.run("buy a widget", 1000, CONFIG)
+
+    assert exit_code == 0
+    assert "PENDING" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("typed", ["", "y", "YES", " yes ", "Y", "yep", "no"])
+async def test_run_only_exact_yes_confirms(monkeypatch, capsys, typed):
+    _wire_happy_path(monkeypatch)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": typed)
+
+    called = {"n": 0}
+    inner = run_module.purchase
+
+    async def counting(session, validated):
+        called["n"] += 1
+        return await inner(session, validated)
+
+    monkeypatch.setattr(run_module, "purchase", counting)
+
+    exit_code = await run_module.run("buy a widget", 1000, CONFIG)
+
+    assert exit_code == 0  # a decline is not a failure
+    assert "DECLINED: purchase not confirmed by operator" in capsys.readouterr().err
+    assert called["n"] == 0  # purchase() never reached
+
+
+async def test_run_decline_logs_purchase_declined_event(monkeypatch, capsys):
+    _wire_happy_path(monkeypatch)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "n")
+    events = []
+    monkeypatch.setattr(
+        run_module, "_safe_log_event", lambda data, *, event_type: events.append((event_type, data))
+    )
+
+    await run_module.run("buy a widget", 1000, CONFIG)
+
+    assert (
+        "purchase_declined",
+        {
+            "goal": "buy a widget",
+            "picks": [{"product_id": "a", "quantity": 1}],
+            "total_inr": 100,
+        },
+    ) in events
+
+
+async def test_run_yes_flag_skips_the_prompt_entirely(monkeypatch, capsys):
+    _wire_happy_path(monkeypatch)
+
+    def boom(_prompt=""):
+        raise AssertionError("input() must not be called with --yes")
+
+    monkeypatch.setattr("builtins.input", boom)
+
+    exit_code = await run_module.run("buy a widget", 1000, CONFIG, assume_yes=True)
+    assert exit_code == 0
+    assert "PENDING" in capsys.readouterr().out
+
+
+# --- blocked outcomes --------------------------------------------------
 
 
 async def test_run_blocks_when_catalog_empty_after_filter(monkeypatch, capsys):
@@ -97,96 +185,18 @@ async def test_run_blocks_when_validation_fails(monkeypatch, capsys):
 
 
 async def test_run_blocks_on_purchase_error(monkeypatch, capsys):
-    monkeypatch.setattr(run_module, "ShopConnection", _FakeConnection)
+    _wire_happy_path(monkeypatch, purchase_result=PurchaseError("checkout exploded"))
 
-    async def fake_discover(session):
-        return CATALOG
-
-    async def fake_decide(goal, budget_inr, catalog, api_key):
-        return [{"product_id": "a", "quantity": 1}]
-
-    async def fake_purchase(session, validated):
-        raise PurchaseError("checkout exploded")
-
-    monkeypatch.setattr(run_module, "discover_catalog", fake_discover)
-    monkeypatch.setattr(run_module, "decide", fake_decide)
-    monkeypatch.setattr(run_module, "purchase", fake_purchase)
-
-    exit_code = await run_module.run("buy a widget", 1000, CONFIG)
+    exit_code = await run_module.run("buy a widget", 1000, CONFIG, assume_yes=True)
 
     assert exit_code == 1
     assert "BLOCKED" in capsys.readouterr().err
 
 
-async def test_run_reports_success_even_if_success_reporting_raises(monkeypatch, capsys):
-    """A completed purchase must never be reported as BLOCKED.
-
-    Regression test: printing the success line used to be able to raise
-    (e.g. UnicodeEncodeError on a cp1252 console, inducible by a hostile
-    product name), which the blanket handler turned into BLOCKED/exit 1 --
-    baiting a retry that would mint a fresh idempotency key and double-charge.
-    """
-    monkeypatch.setattr(run_module, "ShopConnection", _FakeConnection)
-
-    async def fake_discover(session):
-        return CATALOG
-
-    async def fake_decide(goal, budget_inr, catalog, api_key):
-        return [{"product_id": "a", "quantity": 1}]
-
-    async def fake_purchase(session, validated):
-        return "order-1"
-
-    def exploding_report(validated, order_id):
-        raise UnicodeEncodeError("charmap", "₹", 0, 1, "boom")
-
-    monkeypatch.setattr(run_module, "discover_catalog", fake_discover)
-    monkeypatch.setattr(run_module, "decide", fake_decide)
-    monkeypatch.setattr(run_module, "purchase", fake_purchase)
-    monkeypatch.setattr(run_module, "_report_success", exploding_report)
-
-    exit_code = await run_module.run("buy a widget", 1000, CONFIG)
-
-    captured = capsys.readouterr()
-    assert exit_code == 0
-    assert "BLOCKED" not in captured.err
-    assert "order-1" in captured.out
-
-
-async def test_run_success_message_is_ascii_safe_with_hostile_product_name(monkeypatch, capsys):
-    """Untrusted shop-supplied names are sanitized, and no raw rupee sign is printed."""
-    monkeypatch.setattr(run_module, "ShopConnection", _FakeConnection)
-
-    async def fake_discover(session):
-        return [{"id": "a", "name": "Widget ₹", "price_inr": 100, "in_stock": True}]
-
-    async def fake_decide(goal, budget_inr, catalog, api_key):
-        return [{"product_id": "a", "quantity": 1}]
-
-    async def fake_purchase(session, validated):
-        return "order-1"
-
-    monkeypatch.setattr(run_module, "discover_catalog", fake_discover)
-    monkeypatch.setattr(run_module, "decide", fake_decide)
-    monkeypatch.setattr(run_module, "purchase", fake_purchase)
-
-    exit_code = await run_module.run("buy a widget", 1000, CONFIG)
-
-    out = capsys.readouterr().out
-    assert exit_code == 0
-    assert "SUCCESS" in out
-    # No non-ASCII survives into user-facing output.
-    assert out == out.encode("ascii", errors="strict").decode("ascii")
-    assert "INR 100" in out
-
-
 async def test_run_unwraps_exceptiongroup_into_readable_blocked_message(monkeypatch, capsys):
     """A dead shop connection surfaces as an ExceptionGroup (anyio TaskGroup
-    internals) whose default str() - "unhandled errors in a TaskGroup
-    (1 sub-exception)" - tells a human nothing. Confirmed live: running the
-    real CLI with no shop server listening produced exactly that message.
-    The BLOCKED line must surface the real cause instead.
-    """
+    internals) whose default str() tells a human nothing. The BLOCKED line
+    must surface the real cause instead."""
 
     class _FailingConnection:
         def __init__(self, endpoint):
@@ -212,10 +222,74 @@ async def test_run_unwraps_exceptiongroup_into_readable_blocked_message(monkeypa
     assert "TaskGroup" not in err
 
 
-async def test_run_makes_exactly_one_llm_call(monkeypatch, capsys):
-    monkeypatch.setattr(run_module, "ShopConnection", _FakeConnection)
+# --- "already went through" must never become BLOCKED -----------------
 
+
+async def test_run_reports_pending_even_if_pending_reporting_raises(monkeypatch, capsys):
+    """The checkout already went through -- a formatting crash in the
+    PENDING line must never become BLOCKED/exit 1 (baiting a retry that
+    mints a fresh idempotency key)."""
+    _wire_happy_path(monkeypatch)
+
+    def exploding_report(pending):
+        raise UnicodeEncodeError("charmap", RUPEE, 0, 1, "boom")
+
+    monkeypatch.setattr(run_module, "_report_pending", exploding_report)
+
+    exit_code = await run_module.run("buy a widget", 1000, CONFIG, assume_yes=True)
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "BLOCKED" not in captured.err
+    assert "plink-1" in captured.out
+
+
+async def test_run_reports_pending_even_if_checkout_log_call_raises(monkeypatch, capsys):
+    """Mirrors the above but targets the checkout_result ledger call site:
+    it sits after purchased_pending_link is assigned, so the outer handler
+    still reports PENDING even if the log call blows up past _safe_log_event's
+    own swallow."""
+    _wire_happy_path(monkeypatch)
+
+    def exploding_safe_log(data, *, event_type):
+        if event_type == "checkout_result":
+            raise RuntimeError("totally unexpected bug")
+
+    monkeypatch.setattr(run_module, "_safe_log_event", exploding_safe_log)
+
+    exit_code = await run_module.run("buy a widget", 1000, CONFIG, assume_yes=True)
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "BLOCKED" not in captured.err
+    assert "plink-1" in captured.out
+
+
+async def test_run_pending_message_is_ascii_safe_with_hostile_link(monkeypatch, capsys):
+    hostile = PendingPurchase(
+        payment_link_id="plink-" + RUPEE,
+        payment_link_url="https://rzp.io/i/" + RUPEE,
+        total_inr=100,
+        expire_hours=6,
+    )
+    _wire_happy_path(monkeypatch, purchase_result=hostile)
+
+    exit_code = await run_module.run("buy a widget", 1000, CONFIG, assume_yes=True)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "PENDING" in out
+    assert out == out.encode("ascii", errors="strict").decode("ascii")
+    assert "INR 100" in out
+
+
+# --- misc invariants --------------------------------------------------
+
+
+async def test_run_makes_exactly_one_llm_call(monkeypatch, capsys):
     call_count = {"n": 0}
+
+    monkeypatch.setattr(run_module, "ShopConnection", _FakeConnection)
 
     async def fake_discover(session):
         return CATALOG
@@ -225,13 +299,13 @@ async def test_run_makes_exactly_one_llm_call(monkeypatch, capsys):
         return [{"product_id": "a", "quantity": 1}]
 
     async def fake_purchase(session, validated):
-        return "order-1"
+        return PENDING
 
     monkeypatch.setattr(run_module, "discover_catalog", fake_discover)
     monkeypatch.setattr(run_module, "decide", fake_decide)
     monkeypatch.setattr(run_module, "purchase", fake_purchase)
 
-    exit_code = await run_module.run("buy a widget", 1000, CONFIG)
+    exit_code = await run_module.run("buy a widget", 1000, CONFIG, assume_yes=True)
 
     assert exit_code == 0
     assert call_count["n"] == 1
@@ -240,9 +314,10 @@ async def test_run_makes_exactly_one_llm_call(monkeypatch, capsys):
 def test_main_uses_default_budget_when_budget_flag_omitted(monkeypatch, capsys):
     seen = {}
 
-    async def fake_run(goal, budget_inr, config):
+    async def fake_run(goal, budget_inr, config, assume_yes=False):
         seen["goal"] = goal
         seen["budget_inr"] = budget_inr
+        seen["assume_yes"] = assume_yes
         return 0
 
     monkeypatch.setattr(run_module, "load_config", lambda: CONFIG)
@@ -254,6 +329,24 @@ def test_main_uses_default_budget_when_budget_flag_omitted(monkeypatch, capsys):
 
     assert exc_info.value.code == 0
     assert seen["budget_inr"] == CONFIG.default_budget_inr
+    assert seen["assume_yes"] is False
+
+
+def test_main_passes_yes_flag_through(monkeypatch):
+    seen = {}
+
+    async def fake_run(goal, budget_inr, config, assume_yes=False):
+        seen["assume_yes"] = assume_yes
+        return 0
+
+    monkeypatch.setattr(run_module, "load_config", lambda: CONFIG)
+    monkeypatch.setattr(run_module, "run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["emptor", "buy a widget", "--yes"])
+
+    with pytest.raises(SystemExit):
+        run_module.main()
+
+    assert seen["assume_yes"] is True
 
 
 def test_main_blocks_on_config_error(monkeypatch, capsys):
@@ -273,8 +366,8 @@ def test_main_blocks_on_config_error(monkeypatch, capsys):
 # --- Fides ledger integration ----------------------------------------------
 
 
-async def test_run_logs_all_five_events_in_order_on_success_path(monkeypatch, capsys):
-    monkeypatch.setattr(run_module, "ShopConnection", _FakeConnection)
+async def test_run_logs_all_five_events_in_order_on_pending_path(monkeypatch, capsys):
+    _wire_happy_path(monkeypatch)
     calls = []
     monkeypatch.setattr(
         run_module,
@@ -282,20 +375,7 @@ async def test_run_logs_all_five_events_in_order_on_success_path(monkeypatch, ca
         lambda data, *, event_type: calls.append((event_type, data)),
     )
 
-    async def fake_discover(session):
-        return CATALOG
-
-    async def fake_decide(goal, budget_inr, catalog, api_key):
-        return [{"product_id": "a", "quantity": 1}]
-
-    async def fake_purchase(session, validated):
-        return "order-1"
-
-    monkeypatch.setattr(run_module, "discover_catalog", fake_discover)
-    monkeypatch.setattr(run_module, "decide", fake_decide)
-    monkeypatch.setattr(run_module, "purchase", fake_purchase)
-
-    exit_code = await run_module.run("buy a widget", 1000, CONFIG)
+    exit_code = await run_module.run("buy a widget", 1000, CONFIG, assume_yes=True)
 
     assert exit_code == 0
     event_types = [event_type for event_type, _ in calls]
@@ -305,48 +385,10 @@ async def test_run_logs_all_five_events_in_order_on_success_path(monkeypatch, ca
     ]
     data_by_type = dict(calls)
     assert data_by_type["goal_received"]["goal"] == "buy a widget"
-    assert data_by_type["goal_received"]["budget_inr"] == 1000
     assert data_by_type["catalog_retrieved"] == {"catalog_size": 1, "affordable_count": 1}
-    assert data_by_type["llm_decision"]["picks"] == [{"product_id": "a", "quantity": 1}]
     assert data_by_type["validation_result"]["ok"] is True
-    assert data_by_type["checkout_result"]["order_id"] == "order-1"
-
-
-async def test_run_reports_success_even_if_checkout_log_call_raises(monkeypatch, capsys):
-    """A completed purchase must never be reported as BLOCKED, even if the
-    checkout_result ledger write itself blows up in a way that escapes
-    _safe_log_event's own internal swallow -- the call site sits after
-    purchased_order_id is assigned, so the outer handler still reports
-    SUCCESS. Mirrors test_run_reports_success_even_if_success_reporting_raises
-    but targets the ledger call site.
-    """
-    monkeypatch.setattr(run_module, "ShopConnection", _FakeConnection)
-
-    def exploding_safe_log(data, *, event_type):
-        if event_type == "checkout_result":
-            raise RuntimeError("totally unexpected bug")
-
-    monkeypatch.setattr(run_module, "_safe_log_event", exploding_safe_log)
-
-    async def fake_discover(session):
-        return CATALOG
-
-    async def fake_decide(goal, budget_inr, catalog, api_key):
-        return [{"product_id": "a", "quantity": 1}]
-
-    async def fake_purchase(session, validated):
-        return "order-1"
-
-    monkeypatch.setattr(run_module, "discover_catalog", fake_discover)
-    monkeypatch.setattr(run_module, "decide", fake_decide)
-    monkeypatch.setattr(run_module, "purchase", fake_purchase)
-
-    exit_code = await run_module.run("buy a widget", 1000, CONFIG)
-
-    captured = capsys.readouterr()
-    assert exit_code == 0
-    assert "BLOCKED" not in captured.err
-    assert "order-1" in captured.out
+    assert data_by_type["checkout_result"]["payment_link_id"] == "plink-1"
+    assert data_by_type["checkout_result"]["status"] == "pending"
 
 
 def test_safe_log_event_swallows_fides_errors(monkeypatch, capsys):

@@ -1,7 +1,7 @@
 import mcp.types as types
 import pytest
 
-from emptor.purchase import PurchaseError, purchase
+from emptor.purchase import PendingPurchase, PurchaseError, purchase
 from emptor.validate import validate_picks
 
 CATALOG = [
@@ -20,8 +20,37 @@ class _FakeSession:
         return self._responses[name]
 
 
+class _PerCallSession:
+    """Returns a distinct response per call to a given tool name, in call
+    order -- needed to express "item 2 of 3 behaves differently"."""
+
+    def __init__(self, responses_by_name):
+        self._queues = {name: list(results) for name, results in responses_by_name.items()}
+        self.calls = []
+
+    async def call_tool(self, name, arguments=None):
+        self.calls.append((name, arguments))
+        return self._queues[name].pop(0)
+
+
 def _ok_result(structured_content=None):
     return types.CallToolResult(content=[], structured_content=structured_content, is_error=False)
+
+
+def _add_ok(cart_id="cart-1"):
+    return _ok_result({"ok": True, "cart_id": cart_id, "line_total": 100})
+
+
+def _checkout_ok(cart_id_unused=None):
+    return _ok_result(
+        {
+            "ok": True,
+            "payment_link_id": "plink-1",
+            "payment_link_url": "https://rzp.io/i/plink-1",
+            "status": "pending",
+            "expire_hours": 6,
+        }
+    )
 
 
 async def test_purchase_adds_each_item_then_checks_out_once():
@@ -32,33 +61,86 @@ async def test_purchase_adds_each_item_then_checks_out_once():
     )
     assert validated.ok
 
-    session = _FakeSession(
-        {"add_to_cart": _ok_result(), "checkout": _ok_result({"order_id": "order-123"})}
-    )
+    session = _FakeSession({"add_to_cart": _add_ok(), "checkout": _checkout_ok()})
 
-    order_id = await purchase(session, validated)
+    pending = await purchase(session, validated)
 
-    assert order_id == "order-123"
+    assert isinstance(pending, PendingPurchase)
+    assert pending.payment_link_id == "plink-1"
+    assert pending.payment_link_url == "https://rzp.io/i/plink-1"
+    assert pending.total_inr == validated.total_inr
+    assert pending.expire_hours == 6
+
     add_calls = [c for c in session.calls if c[0] == "add_to_cart"]
     checkout_calls = [c for c in session.calls if c[0] == "checkout"]
     assert len(add_calls) == 2
     assert len(checkout_calls) == 1
 
 
+async def test_purchase_threads_one_cart_id_across_every_item():
+    validated = validate_picks(
+        [
+            {"product_id": "a", "quantity": 1},
+            {"product_id": "b", "quantity": 1},
+        ],
+        CATALOG,
+        budget_inr=1000,
+    )
+    session = _FakeSession({"add_to_cart": _add_ok("cart-XYZ"), "checkout": _checkout_ok()})
+
+    await purchase(session, validated)
+
+    add_calls = [args for name, args in session.calls if name == "add_to_cart"]
+    assert "cart_id" not in add_calls[0]  # first call adopts the cart
+    assert add_calls[1]["cart_id"] == "cart-XYZ"  # later calls pass it back
+    checkout_args = next(args for name, args in session.calls if name == "checkout")
+    assert checkout_args["cart_id"] == "cart-XYZ"
+
+
+async def test_purchase_raises_if_shop_ignores_passed_cart_id():
+    validated = validate_picks(
+        [
+            {"product_id": "a", "quantity": 1},
+            {"product_id": "b", "quantity": 1},
+        ],
+        CATALOG,
+        budget_inr=1000,
+    )
+    session = _PerCallSession(
+        {
+            "add_to_cart": [_add_ok("cart-1"), _add_ok("cart-2")],  # shop made a new cart
+            "checkout": [_checkout_ok()],
+        }
+    )
+
+    with pytest.raises(PurchaseError) as exc_info:
+        await purchase(session, validated)
+    assert "ignored the passed cart_id" in str(exc_info.value)
+    assert [c for c in session.calls if c[0] == "checkout"] == []
+
+
+async def test_purchase_no_cart_id_shop_keeps_single_checkout_shape():
+    # A shop that returns no cart_id (one global cart) must still work, with
+    # checkout called with just an idempotency_key.
+    validated = validate_picks([{"product_id": "a", "quantity": 1}], CATALOG, budget_inr=1000)
+    session = _FakeSession({"add_to_cart": _ok_result({"ok": True}), "checkout": _checkout_ok()})
+
+    await purchase(session, validated)
+
+    checkout_args = next(args for name, args in session.calls if name == "checkout")
+    assert set(checkout_args) == {"idempotency_key"}
+
+
 async def test_purchase_uses_fresh_idempotency_key_each_run():
     validated = validate_picks([{"product_id": "a", "quantity": 1}], CATALOG, budget_inr=1000)
 
-    session_1 = _FakeSession(
-        {"add_to_cart": _ok_result(), "checkout": _ok_result({"order_id": "order-1"})}
-    )
+    session_1 = _FakeSession({"add_to_cart": _add_ok(), "checkout": _checkout_ok()})
     await purchase(session_1, validated)
-    key_1 = session_1.calls[-1][1]["idempotency_key"]
+    key_1 = next(a for n, a in session_1.calls if n == "checkout")["idempotency_key"]
 
-    session_2 = _FakeSession(
-        {"add_to_cart": _ok_result(), "checkout": _ok_result({"order_id": "order-2"})}
-    )
+    session_2 = _FakeSession({"add_to_cart": _add_ok(), "checkout": _checkout_ok()})
     await purchase(session_2, validated)
-    key_2 = session_2.calls[-1][1]["idempotency_key"]
+    key_2 = next(a for n, a in session_2.calls if n == "checkout")["idempotency_key"]
 
     assert key_1 != key_2
 
@@ -82,7 +164,7 @@ async def test_purchase_raises_on_add_to_cart_error():
 async def test_purchase_raises_on_checkout_error():
     validated = validate_picks([{"product_id": "a", "quantity": 1}], CATALOG, budget_inr=1000)
     session = _FakeSession(
-        {"add_to_cart": _ok_result(), "checkout": types.CallToolResult(content=[], is_error=True)}
+        {"add_to_cart": _add_ok(), "checkout": types.CallToolResult(content=[], is_error=True)}
     )
 
     with pytest.raises(PurchaseError):
@@ -90,11 +172,6 @@ async def test_purchase_raises_on_checkout_error():
 
 
 async def test_purchase_checkout_rejection_includes_shop_reason():
-    # PUR-07: the shop's rejection reason must be reported verbatim-but-
-    # bounded, not swallowed into a generic "checkout failed". Reproduces
-    # what a real MCP server actually returns on a tool error (confirmed
-    # live against tests/stub_shop): an error CallToolResult with the reason
-    # as a text content block, not structured_content.
     validated = validate_picks([{"product_id": "a", "quantity": 1}], CATALOG, budget_inr=1000)
     checkout_result = types.CallToolResult(
         content=[
@@ -105,12 +182,26 @@ async def test_purchase_checkout_rejection_includes_shop_reason():
         ],
         is_error=True,
     )
-    session = _FakeSession({"add_to_cart": _ok_result(), "checkout": checkout_result})
+    session = _FakeSession({"add_to_cart": _add_ok(), "checkout": checkout_result})
 
     with pytest.raises(PurchaseError) as exc_info:
         await purchase(session, validated)
 
     assert "simulated fraud hold" in str(exc_info.value)
+
+
+async def test_purchase_checkout_business_rejection_includes_reason():
+    # {"ok": false, "reason": ...} inside an otherwise-successful MCP call.
+    validated = validate_picks([{"product_id": "a", "quantity": 1}], CATALOG, budget_inr=1000)
+    session = _FakeSession(
+        {
+            "add_to_cart": _add_ok(),
+            "checkout": _ok_result({"ok": False, "reason": "TOO_MANY_PENDING_PAYMENT_LINKS"}),
+        }
+    )
+    with pytest.raises(PurchaseError) as exc_info:
+        await purchase(session, validated)
+    assert "TOO_MANY_PENDING_PAYMENT_LINKS" in str(exc_info.value)
 
 
 async def test_purchase_add_to_cart_rejection_includes_shop_reason():
@@ -127,42 +218,32 @@ async def test_purchase_add_to_cart_rejection_includes_shop_reason():
     assert "out of stock" in str(exc_info.value)
 
 
-async def test_purchase_raises_if_checkout_returns_no_order_id():
+@pytest.mark.parametrize(
+    "checkout_payload",
+    [
+        None,
+        {"ok": True, "payment_link_url": "https://rzp.io/i/x"},  # missing id
+        {"ok": True, "payment_link_id": "plink-1"},  # missing url
+        {"ok": True, "payment_link_id": "", "payment_link_url": "https://rzp.io/i/x"},
+    ],
+)
+async def test_purchase_raises_if_checkout_returns_no_payment_link(checkout_payload):
     validated = validate_picks([{"product_id": "a", "quantity": 1}], CATALOG, budget_inr=1000)
-    session = _FakeSession({"add_to_cart": _ok_result(), "checkout": _ok_result(None)})
+    session = _FakeSession({"add_to_cart": _add_ok(), "checkout": _ok_result(checkout_payload)})
 
     with pytest.raises(PurchaseError):
         await purchase(session, validated)
 
 
-async def test_purchase_no_order_id_error_includes_idempotency_key():
-    # PUR-08: once checkout has "succeeded" but returned no order_id, money
-    # may already have moved. The error must carry the idempotency_key so a
-    # human can manually reconcile which checkout attempt this was.
+async def test_purchase_no_payment_link_error_includes_idempotency_key():
     validated = validate_picks([{"product_id": "a", "quantity": 1}], CATALOG, budget_inr=1000)
-    session = _FakeSession({"add_to_cart": _ok_result(), "checkout": _ok_result(None)})
+    session = _FakeSession({"add_to_cart": _add_ok(), "checkout": _ok_result(None)})
 
     with pytest.raises(PurchaseError) as exc_info:
         await purchase(session, validated)
 
-    checkout_call = next(c for c in session.calls if c[0] == "checkout")
-    sent_key = checkout_call[1]["idempotency_key"]
+    sent_key = next(a for n, a in session.calls if n == "checkout")["idempotency_key"]
     assert sent_key in str(exc_info.value)
-
-
-class _PerCallSession:
-    """Like _FakeSession, but returns a distinct response per call to a given
-    tool name, in call order. Needed for PUR-09: _FakeSession returns the same
-    canned response for every add_to_cart call, so it can't express "item 2 of
-    3 fails" - every call would fail (or succeed) identically."""
-
-    def __init__(self, responses_by_name):
-        self._queues = {name: list(results) for name, results in responses_by_name.items()}
-        self.calls = []
-
-    async def call_tool(self, name, arguments=None):
-        self.calls.append((name, arguments))
-        return self._queues[name].pop(0)
 
 
 async def test_purchase_stops_before_checkout_if_add_to_cart_fails_partway():
@@ -174,39 +255,40 @@ async def test_purchase_stops_before_checkout_if_add_to_cart_fails_partway():
         CATALOG,
         budget_inr=1000,
     )
-    assert validated.ok
-    assert len(validated.items) == 2
+    assert validated.ok and len(validated.items) == 2
 
     session = _PerCallSession(
         {
-            "add_to_cart": [
-                _ok_result(),
-                types.CallToolResult(content=[], is_error=True),
-            ],
-            "checkout": [_ok_result({"order_id": "should-not-happen"})],
+            "add_to_cart": [_add_ok(), types.CallToolResult(content=[], is_error=True)],
+            "checkout": [_checkout_ok()],
         }
     )
 
     with pytest.raises(PurchaseError):
         await purchase(session, validated)
 
-    checkout_calls = [c for c in session.calls if c[0] == "checkout"]
-    assert checkout_calls == []
+    assert [c for c in session.calls if c[0] == "checkout"] == []
 
 
-async def test_purchase_reads_order_id_from_text_content_when_no_structured_content():
-    # Reproduces a real MCP server observed live: a checkout tool that returns
-    # a plain dict gets serialized as a JSON text block, not
-    # structured_content, unless the tool explicitly opts into a typed output
-    # schema. purchase() must still find the order_id.
+async def test_purchase_reads_payment_link_from_text_content_when_no_structured_content():
+    # A checkout tool that returns a plain dict gets serialized as a JSON
+    # text block, not structured_content, unless it opts into a typed output
+    # schema. purchase() must still find the link.
     validated = validate_picks([{"product_id": "a", "quantity": 1}], CATALOG, budget_inr=1000)
     checkout_result = types.CallToolResult(
-        content=[types.TextContent(type="text", text='{"order_id": "order-from-text"}')],
+        content=[
+            types.TextContent(
+                type="text",
+                text='{"ok": true, "payment_link_id": "plink-txt", '
+                '"payment_link_url": "https://rzp.io/i/txt", "expire_hours": 6}',
+            )
+        ],
         structured_content=None,
         is_error=False,
     )
-    session = _FakeSession({"add_to_cart": _ok_result(), "checkout": checkout_result})
+    session = _FakeSession({"add_to_cart": _add_ok(), "checkout": checkout_result})
 
-    order_id = await purchase(session, validated)
+    pending = await purchase(session, validated)
 
-    assert order_id == "order-from-text"
+    assert pending.payment_link_id == "plink-txt"
+    assert pending.payment_link_url == "https://rzp.io/i/txt"

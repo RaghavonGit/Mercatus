@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 from emptor.validate import ValidationResult
@@ -9,6 +10,19 @@ from emptor.validate import ValidationResult
 
 class PurchaseError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class PendingPurchase:
+    """What ``purchase()`` returns now: a payment link the buyer still has
+    to pay. Deliberately NOT called/typed as a completed order -- no money
+    has moved when this is returned. Mercator's in-process reconciler logs
+    the real final outcome later, from its own process."""
+
+    payment_link_id: str
+    payment_link_url: str
+    total_inr: int
+    expire_hours: int | None
 
 
 def _safe(value: object, limit: int = 200) -> str:
@@ -47,9 +61,24 @@ def _payload_from_result(result: Any) -> dict | None:
     return None
 
 
-def _order_id_from_result(result: Any) -> str | None:
+def _payment_link_from_result(result: Any) -> tuple[str, str, int | None] | None:
+    """Mercator's post-migration checkout contract: a successful checkout
+    returns a payment link (id + payable URL), never an order_id -- money
+    hasn't moved yet. Returns (payment_link_id, payment_link_url,
+    expire_hours) or None if either required field is absent/blank."""
     payload = _payload_from_result(result)
-    return payload.get("order_id") if payload else None
+    if not payload:
+        return None
+    link_id = payload.get("payment_link_id")
+    link_url = payload.get("payment_link_url")
+    if not isinstance(link_id, str) or not link_id:
+        return None
+    if not isinstance(link_url, str) or not link_url:
+        return None
+    expire_hours = payload.get("expire_hours")
+    if not isinstance(expire_hours, int) or isinstance(expire_hours, bool):
+        expire_hours = None
+    return link_id, link_url, expire_hours
 
 
 def _cart_id_from_result(result: Any) -> str | None:
@@ -76,16 +105,24 @@ def _describe_rejection(reason: str | None, detail: str | None) -> str:
     return text
 
 
-async def purchase(session: Any, validated: ValidationResult) -> str:
+async def purchase(session: Any, validated: ValidationResult) -> PendingPurchase:
     if not validated.ok:
         raise PurchaseError(f"cannot purchase: validation failed ({validated.reason})")
 
-    cart_ids: list[str] = []
+    # One shared cart_id threaded across every item. The first add_to_cart
+    # that returns one adopts it; every later call passes it back so all
+    # items land in the same cart (Mercator now supports multi-item carts,
+    # CLAUDE.md section 3/4).
+    cart_id: str | None = None
     for item in validated.items:
-        add_result = await session.call_tool(
-            "add_to_cart",
-            {"product_id": item.product["id"], "quantity": item.quantity},
-        )
+        add_args: dict[str, Any] = {
+            "product_id": item.product["id"],
+            "quantity": item.quantity,
+        }
+        if cart_id is not None:
+            add_args["cart_id"] = cart_id
+
+        add_result = await session.call_tool("add_to_cart", add_args)
         if getattr(add_result, "is_error", False):
             reason = _error_text_from_result(add_result)
             suffix = f": {reason}" if reason else ""
@@ -98,37 +135,27 @@ async def purchase(session: Any, validated: ValidationResult) -> str:
                 f"{_describe_rejection(*rejection)}"
             )
 
-        cart_id = _cart_id_from_result(add_result)
-        if cart_id is not None:
-            cart_ids.append(cart_id)
-
-    # Shops with no cart_id concept (e.g. tests/stub_shop/server.py, which
-    # tracks one global cart) leave cart_ids empty - preserve the original
-    # single checkout({"idempotency_key": ...}) call shape for them exactly.
-    #
-    # Shops that DO return a cart_id per add_to_cart call (Mercator's real
-    # v1 contract, CLAUDE.md section 3: one fresh single-item cart per call)
-    # have no way to check out more than one such cart in a single call -
-    # Emptor's own pipeline (section 3) assumes one checkout call closes out
-    # the whole pick list, which only holds when every item landed in the
-    # same cart_id. >1 distinct cart_id means that assumption doesn't hold
-    # against this shop; fail loudly per rule #7 rather than guessing (e.g.
-    # silently checking out only one cart, or issuing N separate orders
-    # under one "success" message that never promised that shape).
-    distinct_cart_ids = set(cart_ids)
-    if len(distinct_cart_ids) > 1:
-        raise PurchaseError(
-            "cannot purchase: this shop returned a separate cart_id per item "
-            f"({len(distinct_cart_ids)} carts for {len(validated.items)} items) and "
-            "this pipeline has no way to check out more than one cart in a single "
-            "order - unresolved design gap between Emptor's multi-item pipeline and "
-            "this shop's single-item-cart model, see CLAUDE.md"
-        )
+        returned_cart_id = _cart_id_from_result(add_result)
+        if returned_cart_id is None:
+            # Shops with no cart_id concept (e.g. tests/stub_shop/server.py,
+            # one global cart) -- preserve the original single
+            # checkout({"idempotency_key": ...}) shape by leaving cart_id None.
+            continue
+        if cart_id is None:
+            cart_id = returned_cart_id
+        elif returned_cart_id != cart_id:
+            # We passed a cart_id and the shop made a different cart anyway.
+            # The whole-pick-list-in-one-checkout assumption no longer holds;
+            # fail loudly (rule #7) rather than checking out a partial cart.
+            raise PurchaseError(
+                "cannot purchase: shop ignored the passed cart_id "
+                f"(sent {cart_id}, got {returned_cart_id} back for item "
+                f"{item.product['id']}) -- this pipeline needs every item in one cart"
+            )
 
     idempotency_key = str(uuid.uuid4())
     checkout_args: dict[str, Any] = {"idempotency_key": idempotency_key}
-    if distinct_cart_ids:
-        (cart_id,) = distinct_cart_ids
+    if cart_id is not None:
         checkout_args["cart_id"] = cart_id
     checkout_result = await session.call_tool("checkout", checkout_args)
     if getattr(checkout_result, "is_error", False):
@@ -143,10 +170,17 @@ async def purchase(session: Any, validated: ValidationResult) -> str:
             f"{_describe_rejection(*rejection)}"
         )
 
-    order_id = _order_id_from_result(checkout_result)
-    if not order_id:
+    link = _payment_link_from_result(checkout_result)
+    if link is None:
         raise PurchaseError(
-            f"checkout succeeded but shop returned no order_id (idempotency_key={idempotency_key})"
+            "checkout succeeded but shop returned no payment link "
+            f"(idempotency_key={idempotency_key})"
         )
 
-    return order_id
+    payment_link_id, payment_link_url, expire_hours = link
+    return PendingPurchase(
+        payment_link_id=payment_link_id,
+        payment_link_url=payment_link_url,
+        total_inr=validated.total_inr,
+        expire_hours=expire_hours,
+    )
