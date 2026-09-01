@@ -26,7 +26,7 @@ Then, in another terminal, point Emptor's real CLI at it:
                   uv run emptor "a birthday gift for a student who loves stationery" --budget 500
 
 That is a full live run: real MCP connection -> real catalog discovery ->
-real NIM decision -> real validation -> real (stub) checkout.
+real local-LLM decision -> real validation -> real (stub) checkout.
 """
 
 from __future__ import annotations

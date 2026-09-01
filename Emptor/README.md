@@ -17,12 +17,37 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 uv sync
 ```
 
+## LLM setup
+
+The one LLM call (`decide()` — pick catalog items matching the goal) runs
+against a **local model via [Ollama](https://ollama.com)** by default. It
+is not the safety boundary (`validate_picks` + the operator prompt + the
+human paying the link are), so a small model is fine.
+
+```bash
+# once
+ollama serve
+ollama pull qwen2.5:7b-instruct      # ~4.7 GB, primary
+ollama pull qwen2.5:3b-instruct      # ~1.9 GB, fallback for CPU-only / low-VRAM
+```
+
+- **GPU:** an 8 GB NVIDIA card runs the 7B comfortably (~1–2 s/decision).
+- **CPU-only / <6 GB VRAM:** set `LLM_MODEL=qwen2.5:3b-instruct`.
+- If `decide()` gets a non-200 that isn't auth (e.g. the 7B fails to load
+  into VRAM), Emptor automatically retries once with `LLM_MODEL_FALLBACK`.
+- **Hosted provider instead of Ollama:** set `LLM_BASE_URL` (e.g.
+  `https://integrate.api.nvidia.com/v1`), `LLM_MODEL`, and `LLM_API_KEY`.
+  Note `response_format: json_object` support is per-model on hosted
+  providers; a reasoning model that leaks chain-of-thought may need a
+  `decide.py` tweak.
+
 ## Configure
 
 ```bash
 cp .env.example .env
 # then edit .env:
-#   NIM_API_KEY=<your NVIDIA NIM key from build.nvidia.com>
+#   LLM_BASE_URL / LLM_MODEL / LLM_MODEL_FALLBACK  (defaults = local Ollama)
+#   LLM_API_KEY=<only for a hosted provider>
 #   MERCATOR_ENDPOINT=<your MCP shop server's URL>
 #   DEFAULT_BUDGET_INR=<fallback budget if --budget isn't passed>
 ```
@@ -49,9 +74,23 @@ Then prints one of:
 - `DECLINED: purchase not confirmed by operator` (stderr) — you didn't type
   `yes`. Not a failure; exit code 0.
 - `BLOCKED: <reason>` (stderr, non-zero exit) — Emptor never guesses or
-  silently retries a purchase on ambiguity.
+  silently retries a purchase on ambiguity. A common one:
+  `BLOCKED: LLM endpoint ... is not reachable ... 'ollama serve'` — the
+  preflight check runs before anything else.
 - `SUCCESS: …` is retained for a hypothetical future synchronous-payment
   shop; the Payment Link flow above never prints it.
+
+### `--picks`: skip the LLM
+
+```bash
+uv run emptor "buy stationery" --budget 500 \
+  --picks '[{"product_id": "prod_003", "quantity": 1}]'
+```
+
+Feeds the picks straight past `decide()` into validation. Still validated
+(out-of-catalog / over-budget ids are rejected) and still needs operator
+confirmation. For testing and demos when the LLM is unavailable or you want
+a deterministic run.
 
 ## Shop server contract
 
@@ -80,21 +119,23 @@ uv run pytest -v
 ```
 
 The suite above runs entirely against mocks — no real LLM, no real shop
-needed. To exercise the real pipeline end to end (real MCP connection, real
-NIM decision, real checkout), a minimal stub shop server is included at
+needed. The `-m 'not live'` default (see `pyproject.toml`) skips the handful
+of `@pytest.mark.live` tests; those hit the configured `LLM_BASE_URL` and
+**skip themselves cleanly** if it's unreachable, so `uv run pytest -m live`
+is safe to run with or without Ollama up.
+
+To exercise the real pipeline end to end (real MCP connection, real local
+LLM decision, real checkout), a minimal stub shop server is included at
 `tests/stub_shop/server.py`. It is not Mercator and has no payments — it just
 implements the three-tool contract above, backed by
-`tests/fixtures/mock_catalog.json`, so Steps 1/2/6 can be proven against a
-real MCP connection before Mercator exists.
+`tests/fixtures/mock_catalog.json`.
 
 ### Running against the real Mercator
 
 Emptor has been run live against the real [Mercator](../Mercator/) package —
-real MCP connection, real NIM decision, real [Fides](../Fides/) ledger. That
-live run predates the Payment Link migration (it exercised the old
-order-creation path); a fresh end-to-end run against the Payment Link flow
-is pending. Start Mercator with `MCP_TRANSPORT=streamable-http` in its
-`.env` (see its README), then:
+real MCP connection, real LLM decision, real [Fides](../Fides/) ledger. Start
+Mercator with `MCP_TRANSPORT=streamable-http` in its `.env` (see its README),
+and make sure `ollama serve` is running, then:
 
 ```bash
 # PowerShell
@@ -114,7 +155,8 @@ $env:MERCATOR_ENDPOINT = "http://127.0.0.1:8000/mcp"
 uv run emptor "a birthday gift for a student who loves stationery" --budget 500
 ```
 
-Requires a real `NIM_API_KEY` in `.env` — this makes a real NIM API call.
+Requires `ollama serve` running with `qwen2.5:7b-instruct` pulled — this
+makes a real local LLM call.
 
 To try your own products instead of the default fixture, point
 `STUB_CATALOG_PATH` at your own JSON file (same shape as the table above —
@@ -142,6 +184,9 @@ uv run emptor "a comfortable typing setup" --budget 5000
 - The operator-approval prompt reads from stdin. In an environment with no
   usable stdin, use `--yes` (and accept that you've removed the local
   checkpoint).
+- **The local LLM is a ~5 GB download.** Fine for a workstation; not
+  suitable as-is for a thin-client or mobile build. `LLM_BASE_URL` is the
+  seam for pointing at a hosted inference endpoint later.
 
 ## Security posture
 

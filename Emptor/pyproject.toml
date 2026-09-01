@@ -36,5 +36,5 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-m 'not live'"
 markers = [
-    "live: requires a real NIM_API_KEY and/or a running MCP shop server (T3, manual/pre-demo only)",
+    "live: hits the configured LLM_BASE_URL and/or a running MCP shop server; skips itself if unreachable (manual/pre-demo)",
 ]
