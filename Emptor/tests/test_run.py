@@ -5,14 +5,17 @@ import pytest
 from fides import FidesError
 
 import emptor.run as run_module
-from emptor.config import Config, ConfigError
+from emptor.config import Config, ConfigError, LLMSettings
 from emptor.decide import DecideError
 from emptor.discover import DiscoverError
 from emptor.purchase import PendingPurchase, PurchaseError
 from emptor.run import _safe_log_event
 
 CATALOG = [{"id": "a", "name": "Widget", "price_inr": 100, "in_stock": True}]
-CONFIG = Config(nim_api_key="k", mercator_endpoint="http://shop.test", default_budget_inr=1000)
+LLM = LLMSettings(
+    base_url="http://llm.test/v1", model="m", fallback_model="m-small", api_key=None
+)
+CONFIG = Config(llm=LLM, mercator_endpoint="http://shop.test", default_budget_inr=1000)
 
 PENDING = PendingPurchase(
     payment_link_id="plink-1",

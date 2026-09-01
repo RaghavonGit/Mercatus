@@ -139,7 +139,7 @@ async def run(goal: str, budget_inr: int, config: Config, assume_yes: bool = Fal
                 return 1
 
             try:
-                picks = await decide(goal, budget_inr, affordable, config.nim_api_key)
+                picks = await decide(goal, budget_inr, affordable, config.llm)
             except DecideError as exc:
                 print(f"BLOCKED: LLM decision failed: {_safe(exc)}", file=sys.stderr)
                 return 1
