@@ -8,6 +8,15 @@ VALID_ENV = {
     "SPEND_CAP_INR": "1500",
     "ALLOWED_CATEGORIES": "books,toys,stationery",
     "MERCATOR_PORT": "8000",
+    "RAZORPAY_MODE": "test",
+}
+
+# Overrides that put load_config into live mode with its two live-only
+# required fields supplied, for tests that need a valid live config.
+LIVE_OVERRIDES = {
+    "RAZORPAY_MODE": "live",
+    "CUMULATIVE_SPEND_CAP_INR": "5000",
+    "PAYMENT_LINK_EXPIRE_HOURS": "6",
 }
 
 
@@ -27,6 +36,11 @@ def test_load_config_valid_env_returns_config():
     assert config.spend_cap_inr == 1500
     assert config.allowed_categories == ["books", "toys", "stationery"]
     assert config.port == 8000
+    assert config.razorpay_mode == "test"
+    assert config.cumulative_spend_cap_inr is None
+    assert config.cumulative_spend_window_hours == 24
+    assert config.payment_link_expire_hours is None
+    assert config.max_pending_payment_links == 5
 
 
 def test_load_config_missing_razorpay_key_id_raises():
@@ -87,3 +101,185 @@ def test_load_config_port_parses_when_set():
 def test_load_config_port_unparseable_raises():
     with pytest.raises(ConfigError):
         load_config(env(MERCATOR_PORT="not-a-port"))
+
+
+# --- razorpay_mode ---------------------------------------------------------
+
+
+def test_load_config_missing_razorpay_mode_raises():
+    with pytest.raises(ConfigError):
+        load_config(env(RAZORPAY_MODE=None))
+
+
+def test_load_config_empty_razorpay_mode_raises():
+    with pytest.raises(ConfigError):
+        load_config(env(RAZORPAY_MODE=""))
+
+
+@pytest.mark.parametrize("bad_mode", ["Test", "LIVE", "sandbox", "test ", " live", "prod"])
+def test_load_config_invalid_razorpay_mode_raises(bad_mode):
+    with pytest.raises(ConfigError):
+        load_config(env(RAZORPAY_MODE=bad_mode))
+
+
+def test_load_config_razorpay_mode_test_accepted():
+    config = load_config(env(RAZORPAY_MODE="test"))
+    assert config.razorpay_mode == "test"
+
+
+def test_load_config_razorpay_mode_live_accepted():
+    config = load_config(env(**LIVE_OVERRIDES))
+    assert config.razorpay_mode == "live"
+
+
+# --- cumulative_spend_cap_inr ----------------------------------------------
+
+
+def test_load_config_cumulative_spend_cap_defaults_to_none_in_test_mode():
+    config = load_config(env())
+    assert config.cumulative_spend_cap_inr is None
+
+
+def test_load_config_cumulative_spend_cap_parses_when_set():
+    config = load_config(env(CUMULATIVE_SPEND_CAP_INR="3000"))
+    assert config.cumulative_spend_cap_inr == 3000
+
+
+def test_load_config_cumulative_spend_cap_unparseable_raises():
+    with pytest.raises(ConfigError):
+        load_config(env(CUMULATIVE_SPEND_CAP_INR="not-a-number"))
+
+
+def test_load_config_cumulative_spend_cap_negative_raises():
+    with pytest.raises(ConfigError):
+        load_config(env(CUMULATIVE_SPEND_CAP_INR="-5"))
+
+
+def test_load_config_cumulative_spend_cap_zero_raises():
+    with pytest.raises(ConfigError):
+        load_config(env(CUMULATIVE_SPEND_CAP_INR="0"))
+
+
+def test_load_config_live_mode_requires_cumulative_spend_cap():
+    with pytest.raises(ConfigError):
+        load_config(env(RAZORPAY_MODE="live", PAYMENT_LINK_EXPIRE_HOURS="6"))
+
+
+def test_load_config_live_mode_blank_cumulative_spend_cap_raises():
+    with pytest.raises(ConfigError):
+        load_config(
+            env(RAZORPAY_MODE="live", PAYMENT_LINK_EXPIRE_HOURS="6", CUMULATIVE_SPEND_CAP_INR="")
+        )
+
+
+# --- cumulative_spend_window_hours ------------------------------------------
+
+
+def test_load_config_cumulative_spend_window_hours_defaults_to_24():
+    config = load_config(env())
+    assert config.cumulative_spend_window_hours == 24
+
+
+def test_load_config_cumulative_spend_window_hours_parses_when_set():
+    config = load_config(env(CUMULATIVE_SPEND_WINDOW_HOURS="48"))
+    assert config.cumulative_spend_window_hours == 48
+
+
+def test_load_config_cumulative_spend_window_hours_unparseable_raises():
+    with pytest.raises(ConfigError):
+        load_config(env(CUMULATIVE_SPEND_WINDOW_HOURS="not-a-number"))
+
+
+def test_load_config_cumulative_spend_window_hours_zero_raises():
+    with pytest.raises(ConfigError):
+        load_config(env(CUMULATIVE_SPEND_WINDOW_HOURS="0"))
+
+
+def test_load_config_cumulative_spend_window_hours_negative_raises():
+    with pytest.raises(ConfigError):
+        load_config(env(CUMULATIVE_SPEND_WINDOW_HOURS="-1"))
+
+
+def test_load_config_cumulative_spend_window_hours_defaults_to_24_in_live_mode():
+    config = load_config(env(**LIVE_OVERRIDES))
+    assert config.cumulative_spend_window_hours == 24
+
+
+# --- payment_link_expire_hours ----------------------------------------------
+
+
+def test_load_config_payment_link_expire_hours_defaults_to_none_in_test_mode():
+    config = load_config(env())
+    assert config.payment_link_expire_hours is None
+
+
+def test_load_config_payment_link_expire_hours_parses_when_set():
+    config = load_config(env(PAYMENT_LINK_EXPIRE_HOURS="12"))
+    assert config.payment_link_expire_hours == 12
+
+
+def test_load_config_payment_link_expire_hours_unparseable_raises():
+    with pytest.raises(ConfigError):
+        load_config(env(PAYMENT_LINK_EXPIRE_HOURS="not-a-number"))
+
+
+def test_load_config_payment_link_expire_hours_zero_raises():
+    with pytest.raises(ConfigError):
+        load_config(env(PAYMENT_LINK_EXPIRE_HOURS="0"))
+
+
+def test_load_config_payment_link_expire_hours_negative_raises():
+    with pytest.raises(ConfigError):
+        load_config(env(PAYMENT_LINK_EXPIRE_HOURS="-3"))
+
+
+def test_load_config_live_mode_requires_payment_link_expire_hours():
+    with pytest.raises(ConfigError):
+        load_config(env(RAZORPAY_MODE="live", CUMULATIVE_SPEND_CAP_INR="5000"))
+
+
+def test_load_config_live_mode_blank_payment_link_expire_hours_raises():
+    with pytest.raises(ConfigError):
+        load_config(
+            env(RAZORPAY_MODE="live", CUMULATIVE_SPEND_CAP_INR="5000", PAYMENT_LINK_EXPIRE_HOURS="")
+        )
+
+
+def test_load_config_live_mode_with_both_required_fields_succeeds():
+    config = load_config(env(**LIVE_OVERRIDES))
+    assert config.razorpay_mode == "live"
+    assert config.cumulative_spend_cap_inr == 5000
+    assert config.payment_link_expire_hours == 6
+
+
+# --- max_pending_payment_links -----------------------------------------------
+
+
+def test_load_config_max_pending_payment_links_defaults_to_5():
+    config = load_config(env())
+    assert config.max_pending_payment_links == 5
+
+
+def test_load_config_max_pending_payment_links_parses_when_set():
+    config = load_config(env(MAX_PENDING_PAYMENT_LINKS="10"))
+    assert config.max_pending_payment_links == 10
+
+
+def test_load_config_max_pending_payment_links_unparseable_raises():
+    with pytest.raises(ConfigError):
+        load_config(env(MAX_PENDING_PAYMENT_LINKS="not-a-number"))
+
+
+def test_load_config_max_pending_payment_links_zero_raises():
+    with pytest.raises(ConfigError):
+        load_config(env(MAX_PENDING_PAYMENT_LINKS="0"))
+
+
+def test_load_config_max_pending_payment_links_negative_raises():
+    with pytest.raises(ConfigError):
+        load_config(env(MAX_PENDING_PAYMENT_LINKS="-1"))
+
+
+def test_load_config_max_pending_payment_links_defaults_to_5_in_live_mode():
+    config = load_config(env(**LIVE_OVERRIDES))
+    assert config.max_pending_payment_links == 5

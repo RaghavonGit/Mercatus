@@ -4,26 +4,42 @@ import pytest
 
 from mercator.payments import (
     LiveKeyError,
-    assert_test_mode,
+    assert_mode_matches_key,
     create_order,
     make_client,
     rupees_to_paise,
 )
 
 
-def test_assert_test_mode_accepts_rzp_test_prefix():
-    assert_test_mode("rzp_test_abc123")  # does not raise
+def test_assert_mode_matches_key_accepts_test_key_in_test_mode():
+    assert_mode_matches_key("rzp_test_abc123", "test")  # does not raise
 
 
-def test_assert_test_mode_rejects_live_key():
+def test_assert_mode_matches_key_accepts_live_key_in_live_mode():
+    assert_mode_matches_key("rzp_live_abc123", "live")  # does not raise
+
+
+def test_assert_mode_matches_key_rejects_test_key_in_live_mode():
     with pytest.raises(LiveKeyError):
-        assert_test_mode("rzp_live_abc123")
+        assert_mode_matches_key("rzp_test_abc123", "live")
 
 
-@pytest.mark.parametrize("bad_key", ["abc123", "", None, "rzp_test", "RZP_TEST_abc"])
-def test_assert_test_mode_rejects_malformed_key(bad_key):
+def test_assert_mode_matches_key_rejects_live_key_in_test_mode():
     with pytest.raises(LiveKeyError):
-        assert_test_mode(bad_key)
+        assert_mode_matches_key("rzp_live_abc123", "test")
+
+
+@pytest.mark.parametrize("mode", ["test", "live"])
+@pytest.mark.parametrize("bad_key", ["abc123", "", None, "rzp_test", "RZP_TEST_abc", "RZP_LIVE_abc"])
+def test_assert_mode_matches_key_rejects_malformed_key_regardless_of_mode(bad_key, mode):
+    with pytest.raises(LiveKeyError):
+        assert_mode_matches_key(bad_key, mode)
+
+
+@pytest.mark.parametrize("bad_mode", ["Test", "LIVE", "sandbox", "", None, "prod"])
+def test_assert_mode_matches_key_rejects_invalid_mode_string(bad_mode):
+    with pytest.raises(LiveKeyError):
+        assert_mode_matches_key("rzp_test_abc123", bad_mode)
 
 
 def test_rupees_to_paise_conversion():
@@ -86,11 +102,37 @@ def test_create_order_malformed_response_missing_status_returns_payment_failed()
     assert result == {"ok": False, "reason": "PAYMENT_FAILED"}
 
 
-def test_make_client_refuses_live_key():
-    with pytest.raises(LiveKeyError):
-        make_client("rzp_live_abc123", "secret")
+# --- make_client: full mode x key-prefix matrix -----------------------------
 
 
-def test_make_client_returns_usable_client_for_test_key():
-    client = make_client("rzp_test_abc123", "secret")
+def test_make_client_test_key_with_mode_test_succeeds():
+    client = make_client("rzp_test_abc123", "secret", "test")
     assert hasattr(client, "order")
+
+
+def test_make_client_live_key_with_mode_live_succeeds():
+    # razorpay.Client(auth=...) does not make any network call on
+    # construction, so this is safe to exercise with a live-shaped key.
+    client = make_client("rzp_live_abc123", "secret", "live")
+    assert hasattr(client, "order")
+
+
+def test_make_client_test_key_with_mode_live_fails():
+    with pytest.raises(LiveKeyError):
+        make_client("rzp_test_abc123", "secret", "live")
+
+
+def test_make_client_live_key_with_mode_test_fails():
+    with pytest.raises(LiveKeyError):
+        make_client("rzp_live_abc123", "secret", "test")
+
+
+@pytest.mark.parametrize("mode", ["test", "live"])
+def test_make_client_malformed_key_fails_regardless_of_mode(mode):
+    with pytest.raises(LiveKeyError):
+        make_client("not_a_real_key", "secret", mode)
+
+
+def test_make_client_rejects_invalid_mode_string():
+    with pytest.raises(LiveKeyError):
+        make_client("rzp_test_abc123", "secret", "sandbox")

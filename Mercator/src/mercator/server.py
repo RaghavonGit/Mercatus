@@ -242,7 +242,9 @@ def load_env() -> dict:
 def main() -> None:
     env = load_env()
     config = load_config(env)
-    razorpay_client = payments.make_client(config.razorpay_key_id, config.razorpay_key_secret)
+    razorpay_client = payments.make_client(
+        config.razorpay_key_id, config.razorpay_key_secret, config.razorpay_mode
+    )
     catalog = load_catalog(DEFAULT_CATALOG_PATH)
 
     server = build_server(

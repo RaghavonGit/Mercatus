@@ -30,6 +30,11 @@ TEST_CONFIG = Config(
     spend_cap_inr=1500,
     allowed_categories=["books", "toys", "stationery"],
     port=8000,
+    razorpay_mode="test",
+    cumulative_spend_cap_inr=None,
+    cumulative_spend_window_hours=24,
+    payment_link_expire_hours=None,
+    max_pending_payment_links=5,
 )
 
 

@@ -1,5 +1,6 @@
-"""Razorpay test-mode order creation. Order creation only — v1 stops there,
-it does not simulate payment capture (CLAUDE.md section 17).
+"""Razorpay order creation, in either test or live mode. Order creation
+only — v1 stops there, it does not simulate payment capture (CLAUDE.md
+section 17).
 
 Amount conversion (integer rupees -> paise, Razorpay's smallest currency
 unit) happens in exactly one place: ``rupees_to_paise``, called from
@@ -21,9 +22,21 @@ class LiveKeyError(RuntimeError):
     pass
 
 
-def assert_test_mode(key_id: str | None) -> None:
-    if not isinstance(key_id, str) or not key_id.startswith("rzp_test_"):
-        raise LiveKeyError("Refusing to start: RAZORPAY_KEY_ID does not look like a test key.")
+_MODE_KEY_PREFIXES = {"test": "rzp_test_", "live": "rzp_live_"}
+
+
+def assert_mode_matches_key(key_id: str | None, mode: str) -> None:
+    expected_prefix = _MODE_KEY_PREFIXES.get(mode)
+    if expected_prefix is None:
+        raise LiveKeyError(
+            f"Refusing to start: unknown RAZORPAY_MODE {mode!r}; must be one of "
+            f"{sorted(_MODE_KEY_PREFIXES)}."
+        )
+    if not isinstance(key_id, str) or not key_id.startswith(expected_prefix):
+        raise LiveKeyError(
+            f"Refusing to start: RAZORPAY_KEY_ID does not look like a {mode!r}-mode key "
+            f"(expected it to start with {expected_prefix!r})."
+        )
 
 
 def rupees_to_paise(amount_inr: int) -> int:
@@ -32,8 +45,8 @@ def rupees_to_paise(amount_inr: int) -> int:
     return amount_inr * 100
 
 
-def make_client(key_id: str, key_secret: str) -> razorpay.Client:
-    assert_test_mode(key_id)
+def make_client(key_id: str, key_secret: str, mode: str) -> razorpay.Client:
+    assert_mode_matches_key(key_id, mode)
     return razorpay.Client(auth=(key_id, key_secret))
 
 
