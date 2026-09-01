@@ -1,19 +1,25 @@
 from __future__ import annotations
 
 import json
+import os
 
 import httpx
 
 from emptor.filters import Product
 
 NIM_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-# nvidia/llama-3.3-nemotron-super-49b-v1 reached end-of-life 2026-08-26 (HTTP
-# 410 from NIM) and was replaced with the Nemotron 3 generation. Verified
-# live against the account's actual /v1/models list, 2026-08-31. Nemotron 3
-# models emit chain-of-thought into `message.content` by default (breaks the
-# raw_decode() JSON parsing below) unless `chat_template_kwargs.thinking` is
-# explicitly set to false - see the request body below.
-NIM_MODEL = "nvidia/nemotron-3-nano-30b-a3b"
+# build.nvidia.com's preview catalog churns fast - models appear in
+# /v1/models but their backing NVCF function gets undeployed per-account,
+# returning a 404 "Function ... Not found for account". History on this line:
+#   nvidia/llama-3.3-nemotron-super-49b-v1  -> 410 Gone      (2026-08-26)
+#   nvidia/nemotron-3-nano-30b-a3b          -> 404 no function (2026-09-01)
+# So the model is env-overridable (NIM_MODEL) - a rotation is a .env edit,
+# not a code change. Default verified live against this account 2026-09-01;
+# picked for a clean JSON `message.content` (the Nemotron 3 line emits
+# chain-of-thought into content, which breaks the raw_decode() parse below;
+# `chat_template_kwargs.thinking=false` in the body is the mitigation for
+# those and is harmless to models that ignore it).
+NIM_MODEL = os.environ.get("NIM_MODEL", "openai/gpt-oss-20b")
 
 SYSTEM_PROMPT = (
     "You are a shopping assistant for an autonomous purchasing agent. "

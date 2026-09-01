@@ -198,17 +198,13 @@ async def test_decide_live_ambiguous_goal_does_not_force_a_pick():
     # is a live-model-behavior observation, not a deterministic guarantee -
     # record what the model actually returns rather than assuming a pass.
     #
-    # OBSERVED LIVE (2026-08-25): the model does NOT force a pick - good -
-    # but it also doesn't obey the "respond with ONLY a JSON object" system
-    # instruction when declining. It replies in prose ("I'm sorry, but after
-    # reviewing the catalog, I couldn't find a product that suits your
-    # request..."), which fails JSON parsing and surfaces as DecideError
-    # rather than an empty picks list. run.py turns this into a clean
-    # `BLOCKED: LLM decision failed: ...` - fail-closed and not a security
-    # issue (rule #7 holds) - but it's mislabeled: this is "nothing fits",
-    # not a malfunction. Not fixed here; this is a decide.py prompt/parsing
-    # design question, out of scope for a testing pass per CLAUDE.md sec 0.6.
-    # See CLAUDE.md Decision Log / Open Questions, 2026-08-25.
+    # OBSERVED LIVE (2026-08-25, nvidia nemotron): declined in prose instead
+    # of JSON, which surfaced as a (fail-closed) DecideError.
+    # OBSERVED LIVE (2026-09-01, openai/gpt-oss-20b, current default): obeys
+    # the "ONLY a JSON object" instruction and returns {"picks": []} cleanly.
+    # That is the intended DEC-L3 outcome, so we assert it now - but tolerate
+    # a DecideError too, since a future model swap could regress to prose and
+    # that is still fail-closed, not a security issue (rule #7 holds).
     config = load_config()
     catalog = [
         {"id": "sku-001", "name": "Notebook - A5 Ruled", "price_inr": 120, "in_stock": True},
@@ -216,15 +212,19 @@ async def test_decide_live_ambiguous_goal_does_not_force_a_pick():
         {"id": "sku-006", "name": "Sticky Notes Set", "price_inr": 60, "in_stock": True},
     ]
 
-    with pytest.raises(DecideError) as exc_info:
-        await decide(
+    try:
+        picks = await decide(
             "I need a fully-fueled rocket to fly to Mars this weekend",
             1000,
             catalog,
             config.nim_api_key,
         )
+    except DecideError as exc:
+        print(f"DEC-L3 live result: declined via DecideError (acceptable): {exc}")
+        return
 
-    print(f"DEC-L3 live result: raised DecideError: {exc_info.value}")
+    print(f"DEC-L3 live result: picks={picks}")
+    assert picks == [], "ambiguous goal must not force a pick"
 
 
 @pytest.mark.live
