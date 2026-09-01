@@ -10,12 +10,20 @@ Zero LLM calls. Every guardrail is deterministic, server-side, fail-closed.
 ## Status
 
 All core modules are built and tested: guardrails, idempotency, catalog
-sanitization, cart, config, payments, ledger, and the MCP server itself
-(three tools: `list_products`, `add_to_cart`, `checkout`). 196 tests passing.
+sanitization, cart, config, payments, the durable spend tracker, ledger,
+and the MCP server itself (three tools: `list_products`, `add_to_cart`,
+`checkout`) plus the in-process payment-link reconciler. 334 tests passing.
 
-- **Payments**: verified against the **real** Razorpay test-mode API (not
-  just mocks) — order creation, amount echoing, and idempotency (no
-  double-charge on a replayed key) all confirmed live.
+- **Real-money path (Payment Links)**: `checkout` now creates a Razorpay
+  **Payment Link** the buyer pays themselves in a browser — no
+  pre-authorized autopay. A background poller reconciles the outcome. The
+  full mocked test matrix passes; a live test-mode verification pass (a
+  real link, paid by hand) is the next step before `RAZORPAY_MODE=live` is
+  ever set.
+- **Legacy orders**: `payments.create_order` and its live test-mode
+  verification (order creation, amount echoing, replayed-key idempotency,
+  all confirmed against the real Razorpay test API) remain in the codebase
+  but are no longer on the `checkout` path.
 - **Real MCP client**: tested over an actual stdio subprocess (the official
   MCP Inspector, and a raw `ClientSession`) — caught and fixed a real
   output-schema bug that in-process testing alone had missed.
@@ -30,10 +38,9 @@ sanitization, cart, config, payments, ledger, and the MCP server itself
 Full history and reasoning for all of the above lives in `CLAUDE.md`
 section 15 (decision log) and section 16 (build status table).
 
-**Known gap**: multi-item purchases aren't supported yet. Every
-`add_to_cart` call opens its own fresh single-item cart, and there's no way
-to check out more than one cart in a single order — see "Known limitations"
-below.
+**Multi-item carts** are now supported: `add_to_cart` takes an optional
+`cart_id` and merges repeat products into one line; `checkout` closes out
+the whole cart in one Payment Link.
 
 ## Setup
 
@@ -49,9 +56,33 @@ uv run mercator
 ```
 
 Registers three MCP tools: `list_products`, `add_to_cart`, `checkout`.
-Requires a valid `.env` (see `.env.example`) — the server refuses to start
-if `RAZORPAY_KEY_ID` doesn't look like a test-mode key (`rzp_test_...`), or
-if `SPEND_CAP_INR`/`ALLOWED_CATEGORIES` are missing or malformed.
+Requires a valid `.env` (see `.env.example`). The server refuses to start
+if any required value is missing or malformed, including:
+
+- `RAZORPAY_MODE` — must be exactly `test` or `live`.
+- `RAZORPAY_KEY_ID` — its prefix must match the declared mode
+  (`rzp_test_…` for `test`, `rzp_live_…` for `live`); a mismatch either
+  direction is a startup failure.
+- `SPEND_CAP_INR`, `ALLOWED_CATEGORIES` — as before.
+
+On startup the server also cancels every payment link left in a
+`created`/`issued` state from a previous run (they can no longer be
+reconciled — this process has no record of which cart they belonged to)
+and logs each cancellation to the ledger. **Note:** this cancels *every*
+open link on the Razorpay account, not only ones this deployment created.
+
+### Real-money configuration
+
+| Env var | Meaning | Default |
+|---|---|---|
+| `RAZORPAY_MODE` | `test` or `live` | required |
+| `CUMULATIVE_SPEND_CAP_INR` | rolling-window cap across all checkouts; `checkout` is refused (`CUMULATIVE_SPEND_CAP_EXCEEDED`) if `already_paid + this_cart` would exceed it | none in test mode; **required** when `live` |
+| `CUMULATIVE_SPEND_WINDOW_HOURS` | width of that rolling window | `24` |
+| `PAYMENT_LINK_EXPIRE_HOURS` | how long a created link stays payable (stock stays reserved that whole time) | `6` in test mode; **required** when `live` |
+| `MAX_PENDING_PAYMENT_LINKS` | `checkout` is refused (`TOO_MANY_PENDING_PAYMENT_LINKS`) while this many links are already awaiting payment | `5` |
+
+Going live forces every real bound to be set deliberately — no falling
+back to a test-mode default.
 
 **Transport**: defaults to **stdio** (what Claude Desktop, the MCP
 Inspector, and this project's own client tests use). To serve over HTTP
@@ -81,23 +112,39 @@ path at a different JSON file to change what Mercator sells — every entry
 is sanitized and validated on load; malformed entries are skipped, not
 crashed on.
 
+## Payment-link reconciler
+
+A single daemon thread, started in `main()` before `server.run()`, polls
+Razorpay every ~45s for the status of every link still awaiting payment:
+
+- **paid** → records the amount in the durable spend tracker, logs a final
+  `checkout_result` (`status: "paid"`), drops the entry.
+- **expired** / **cancelled** → releases the stock reservation, logs a
+  final `checkout_result` with that status, drops the entry.
+- **partially_paid** → logs once (shouldn't happen — links are created
+  `accept_partial=false`), keeps waiting.
+- **pending** / **unknown** → no action; fails closed toward "keep waiting".
+
+The loop is unkillable: one failed poll is logged to stderr and the next
+poll still runs.
+
 ## Audit ledger
 
-Every guardrail check and every checkout result — accepted and rejected —
-is appended to `ledger.db`, a Fides hash-chain (`fides.Ledger`, see
-`CLAUDE.md` section 9.5) in the repo root. `ledger.db` is gitignored. Call
-`Ledger(path).verify_chain()` (a thin passthrough to Fides) to confirm the
-chain hasn't been tampered with.
+Every guardrail check and every checkout result — accepted, rejected, and
+the reconciler's later final outcomes — is appended to `ledger.db`, a Fides
+hash-chain (`fides.Ledger`, see `CLAUDE.md` section 9.5) in the repo root.
+`ledger.db` is gitignored. Call `Ledger(path).verify_chain()` (a thin
+passthrough to Fides) to confirm the chain hasn't been tampered with.
 
 ## Known limitations (v1 / demo scope)
 
-- Idempotency store is in-memory — restarting the server loses it.
-- Spend cap is per-transaction only, not cumulative.
-- **Single-item carts only.** Each `add_to_cart` call opens a fresh cart for
-  exactly one product; `checkout` closes out exactly one cart. A client
-  that picks multiple distinct products (Emptor's own pipeline does) has no
-  way to check them out as a single order against this server today — this
-  was confirmed by running the real Emptor agent against this server, not
-  just assumed. Resolving it needs a decision: grow this server's cart to
-  hold multiple items, or have the client issue one order per item.
-- Payment flow stops at order creation — no capture simulation.
+- Idempotency store and the pending-payment-links tracking are in-memory —
+  restarting the server loses them.
+- **No cross-restart durability for in-flight (pending) purchases.** A
+  restart cancels every open payment link (startup cleanup, above); a buyer
+  mid-payment must request a fresh checkout. The one thing that *does*
+  survive a restart is the cumulative spend total (SQLite
+  `spend_tracker.db`) — resetting it would silently widen a real-money cap.
+- Reconciliation is **poll-only** — no Razorpay webhooks.
+- The legacy `create_order` path has no capture simulation (and is no
+  longer wired into `checkout`).

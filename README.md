@@ -16,32 +16,39 @@ Emptor  (buyer)  ──MCP──>  Mercator  (merchant)  ──writes to──> 
 | Package | Role | Details |
 |---|---|---|
 | **[Emptor](Emptor/)** | Autonomous shopper agent. Given a goal in plain English and a budget, connects to any MCP-compatible shop, reads its catalog, and decides what to buy via a single LLM call (NVIDIA NIM). Never decides whether a purchase is *allowed*. | [Emptor/README.md](Emptor/README.md) |
-| **[Mercator](Mercator/)** | Merchant MCP server. Hosts a catalog and enforces every purchase rule (stock, allowlist, spend cap, idempotency) deterministically, server-side. Zero LLM calls. Creates real Razorpay test-mode orders. | [Mercator/README.md](Mercator/README.md) |
+| **[Mercator](Mercator/)** | Merchant MCP server. Hosts a catalog and enforces every purchase rule (stock, allowlist, per-transaction + cumulative spend caps, pending-link limit, idempotency) deterministically, server-side. Zero LLM calls. `checkout` creates a Razorpay **Payment Link** the buyer pays themselves; an in-process poller reconciles the outcome. | [Mercator/README.md](Mercator/README.md) |
 | **[Fides](Fides/)** | Dependency-free, tamper-evident trust ledger. Records events from Emptor and Mercator as a SHA256 hash-linked chain and can prove — not just claim — whether the chain has been altered. Standard library only. | [Fides/README.md](Fides/README.md) |
 
 ## Status
 
-All three packages are independently built and tested (350 tests combined —
-196 Mercator, 92 Emptor, 62 Fides), and the full pipeline has been run live,
-end to end: a real MCP connection, a real NIM decision, a real Razorpay
-test-mode order, and a real, chain-verified Fides ledger entry. A real
-server-side rejection (an over-budget purchase blocked by Mercator's
-spend-cap guardrail) has been verified the same way.
+All three packages are independently built and tested (504 tests combined —
+334 Mercator, 108 Emptor, 62 Fides). An earlier end-to-end run exercised the
+old order-creation path live: a real MCP connection, a real NIM decision, a
+real Razorpay test-mode order, a real chain-verified Fides ledger entry, and
+a real server-side rejection (over-budget, blocked by the spend-cap
+guardrail).
 
-**Known gap**: multi-item purchases aren't supported end to end yet.
-Mercator's cart is single-item-only, and there's currently no way to check
-out a multi-item pick list as one order — Emptor detects this and fails
-loudly with a clear reason rather than mishandling it. See
-[Mercator's README](Mercator/README.md#known-limitations-v1--demo-scope)
-for details.
+The **real-money upgrade** is now built (Payment Links, cumulative spend
+cap, pending-link limit, durable spend tracker, in-process reconciler,
+Emptor operator-approval checkpoint). It passes its full mocked test matrix;
+a fresh live test-mode verification against the Payment Link flow is the
+next step — and `RAZORPAY_MODE=live` stays off until that passes.
+
+**Multi-item purchases** now work end to end: Emptor threads one `cart_id`
+across every item and Mercator checks the whole cart out as one Payment
+Link.
 
 ## Design principle
 
 Money-safety enforcement lives entirely on the merchant side (Mercator).
 Emptor is treated as untrusted — even a well-intentioned shopper agent can be
 manipulated via prompt injection in catalog data, so every guardrail
-(spend cap, category allowlist, stock, idempotency) is re-verified server-side
-on every call, fail-closed.
+(per-transaction + cumulative spend caps, category allowlist, stock,
+pending-link limit, idempotency) is re-verified server-side on every call,
+fail-closed. Emptor's own operator-approval prompt and its LLM-output sanity
+check are *additional* checkpoints, never the safety boundary — the real
+boundary is the human who clicks the payment link plus Mercator's
+server-side rules.
 
 ## Setup
 
@@ -73,12 +80,15 @@ cd Mercator && uv run mercator
 cd Emptor
 $env:MERCATOR_ENDPOINT = "http://127.0.0.1:8000/mcp"
 uv run emptor "a fantasy novel to read" --budget 500
+# Emptor shows the picks and total, then waits for you to type `yes`.
+# It prints a PENDING line with a payment link; open it and pay it in a
+# browser, and Mercator's reconciler logs the final outcome within ~45s.
 ```
 
 See each package's own README for full install, configuration, and usage
-details — Mercator's covers the transport flag, Emptor's covers this exact
-walkthrough and its one known limitation (single-item purchases only, for
-now).
+details — Mercator's covers the transport flag and the real-money config
+(`RAZORPAY_MODE` and the spend/link bounds), Emptor's covers this
+walkthrough, the operator-approval prompt, and the `--yes` flag.
 
 ## License
 
