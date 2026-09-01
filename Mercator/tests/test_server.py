@@ -15,9 +15,11 @@ from mercator.server import (
     AddToCartResult,
     CheckoutResult,
     Product,
+    _cancel_orphaned_payment_links,
     build_server,
     load_env,
 )
+from mercator.spend_tracker import SpendTracker
 
 CATALOG = [
     {"id": "prod_001", "name": "The Hobbit", "price_inr": 450, "in_stock": True, "category": "books", "stock": 12, "description": "A novel.", "_flagged": False},
@@ -38,16 +40,47 @@ TEST_CONFIG = Config(
 )
 
 
-def make_fake_razorpay_client(order_response=None, raises=None):
+def make_fake_razorpay_client(
+    link_response=None,
+    create_raises=None,
+    all_response=None,
+    all_raises=None,
+    fetch_response=None,
+):
+    """Every payment_link method is stubbed explicitly -- a bare Mock()
+    silently fails closed (create returns a Mock -> recovery -> .all()
+    returns a Mock -> [] -> PAYMENT_FAILED), which hides which path a test
+    is actually exercising."""
     client = Mock()
-    if raises is not None:
-        client.order.create.side_effect = raises
+    if create_raises is not None:
+        client.payment_link.create.side_effect = create_raises
     else:
-        client.order.create.return_value = order_response or {"id": "order_1", "status": "created"}
+        client.payment_link.create.return_value = link_response or {
+            "id": "plink_1",
+            "short_url": "https://rzp.io/i/plink_1",
+            "status": "created",
+        }
+    if all_raises is not None:
+        client.payment_link.all.side_effect = all_raises
+    else:
+        client.payment_link.all.return_value = all_response or {"payment_links": []}
+    client.payment_link.fetch.return_value = fetch_response or {
+        "status": "created",
+        "amount": 0,
+        "amount_paid": 0,
+    }
+    client.payment_link.cancel.return_value = {"status": "cancelled"}
     return client
 
 
-def make_server(tmp_path, catalog=None, razorpay_client=None, config=None, ledger=None):
+def make_server(
+    tmp_path,
+    catalog=None,
+    razorpay_client=None,
+    config=None,
+    ledger=None,
+    spend_tracker=None,
+):
     # deepcopy, not list(): checkout mutates a product dict's "stock" in
     # place (the reservation fix), so a shallow copy would still let one
     # test's committed reservation leak into every other test sharing the
@@ -59,7 +92,33 @@ def make_server(tmp_path, catalog=None, razorpay_client=None, config=None, ledge
         cart_store=CartStore(),
         idempotency_store=IdempotencyStore(),
         ledger=ledger if ledger is not None else Ledger(tmp_path / "ledger.db"),
+        spend_tracker=spend_tracker
+        if spend_tracker is not None
+        else SpendTracker(tmp_path / "spend.db"),
     )
+
+
+CONFIG_WITH_CUMULATIVE_CAP = Config(
+    razorpay_key_id="rzp_test_abc",
+    razorpay_key_secret="secret",
+    spend_cap_inr=100_000,  # per-transaction cap out of the way for these tests
+    allowed_categories=["books", "toys", "stationery"],
+    port=8000,
+    razorpay_mode="test",
+    cumulative_spend_cap_inr=1000,
+    cumulative_spend_window_hours=24,
+    payment_link_expire_hours=None,
+    max_pending_payment_links=5,
+)
+
+
+def paid_fetch(amount_inr):
+    paise = amount_inr * 100
+    return {"status": "paid", "amount": paise, "amount_paid": paise}
+
+
+def server_stock(server, product_id):
+    return server._catalog_by_id[product_id]["stock"]
 
 
 # --- output schema vs. actual runtime response shape ----------------------
@@ -102,7 +161,14 @@ def test_add_to_cart_failure_shape_validates_against_declared_schema():
 def test_checkout_success_shape_validates_against_declared_schema():
     schema = _output_schema(CheckoutResult)
     filled = _as_sdk_would_fill(
-        schema, {"ok": True, "order_id": "order_1", "amount": 450, "status": "created"}
+        schema,
+        {
+            "ok": True,
+            "payment_link_id": "plink_1",
+            "payment_link_url": "https://rzp.io/i/plink_1",
+            "amount": 450,
+            "status": "pending",
+        },
     )
     jsonschema.validate(filled, schema)
 
@@ -179,7 +245,9 @@ async def test_add_to_cart_unknown_product(tmp_path):
 
 @pytest.mark.asyncio
 async def test_checkout_full_success_flow(tmp_path):
-    client = make_fake_razorpay_client(order_response={"id": "order_1", "status": "created"})
+    client = make_fake_razorpay_client(
+        link_response={"id": "plink_1", "short_url": "https://rzp.io/i/plink_1", "status": "created"}
+    )
     server = make_server(tmp_path, razorpay_client=client)
     add_result = await server.call_tool("add_to_cart", {"product_id": "prod_001", "quantity": 1})
     cart_id = add_result.structured_content["cart_id"]
@@ -187,9 +255,76 @@ async def test_checkout_full_success_flow(tmp_path):
     checkout_result = await server.call_tool("checkout", {"cart_id": cart_id, "idempotency_key": "idem-1"})
     body = checkout_result.structured_content
     assert body["ok"] is True
-    assert body["order_id"] == "order_1"
+    assert body["payment_link_id"] == "plink_1"
+    assert body["payment_link_url"] == "https://rzp.io/i/plink_1"
     assert body["amount"] == 450
-    assert body["status"] == "created"
+    assert body["status"] == "pending"
+
+    # a pending-links entry was registered against this cart
+    assert cart_id in server._pending_links
+    assert server._pending_links[cart_id]["total"] == 450
+
+
+@pytest.mark.asyncio
+async def test_checkout_refused_when_max_pending_links_reached(tmp_path):
+    config = Config(
+        razorpay_key_id="rzp_test_abc",
+        razorpay_key_secret="secret",
+        spend_cap_inr=100_000,
+        allowed_categories=["books", "toys", "stationery"],
+        port=8000,
+        razorpay_mode="test",
+        cumulative_spend_cap_inr=None,
+        cumulative_spend_window_hours=24,
+        payment_link_expire_hours=None,
+        max_pending_payment_links=1,
+    )
+    server = make_server(tmp_path, config=config)
+
+    first_add = await server.call_tool("add_to_cart", {"product_id": "prod_001", "quantity": 1})
+    second_add = await server.call_tool("add_to_cart", {"product_id": "prod_001", "quantity": 1})
+
+    ok = await server.call_tool(
+        "checkout", {"cart_id": first_add.structured_content["cart_id"], "idempotency_key": "idem-1"}
+    )
+    assert ok.structured_content["ok"] is True
+
+    stock_before = server_stock(server, "prod_001")
+    refused = await server.call_tool(
+        "checkout", {"cart_id": second_add.structured_content["cart_id"], "idempotency_key": "idem-2"}
+    )
+    assert refused.structured_content["ok"] is False
+    assert refused.structured_content["reason"] == "TOO_MANY_PENDING_PAYMENT_LINKS"
+    # refusal is before the reservation -- no stock touched
+    assert server_stock(server, "prod_001") == stock_before
+
+
+@pytest.mark.asyncio
+async def test_checkout_refused_when_cumulative_cap_would_be_exceeded(tmp_path):
+    server = make_server(tmp_path, config=CONFIG_WITH_CUMULATIVE_CAP)
+    server._spend_tracker.record_paid(800)  # 800 already spent, cap is 1000
+
+    add_result = await server.call_tool("add_to_cart", {"product_id": "prod_001", "quantity": 1})
+    cart_id = add_result.structured_content["cart_id"]  # 450 -> 800 + 450 = 1250 > 1000
+
+    stock_before = server_stock(server, "prod_001")
+    result = await server.call_tool("checkout", {"cart_id": cart_id, "idempotency_key": "idem-1"})
+    assert result.structured_content["ok"] is False
+    assert result.structured_content["reason"] == "CUMULATIVE_SPEND_CAP_EXCEEDED"
+    assert server_stock(server, "prod_001") == stock_before
+
+
+@pytest.mark.asyncio
+async def test_checkout_cumulative_cap_is_a_noop_when_unconfigured(tmp_path):
+    # TEST_CONFIG has cumulative_spend_cap_inr=None: a huge prior spend
+    # must not matter.
+    server = make_server(tmp_path)
+    server._spend_tracker.record_paid(9_999_999)
+
+    add_result = await server.call_tool("add_to_cart", {"product_id": "prod_001", "quantity": 1})
+    cart_id = add_result.structured_content["cart_id"]
+    result = await server.call_tool("checkout", {"cart_id": cart_id, "idempotency_key": "idem-1"})
+    assert result.structured_content["ok"] is True
 
 
 @pytest.mark.asyncio
@@ -224,7 +359,7 @@ async def test_checkout_spend_cap_exceeded(tmp_path):
 
 @pytest.mark.asyncio
 async def test_checkout_same_idempotency_key_does_not_charge_twice(tmp_path):
-    client = make_fake_razorpay_client(order_response={"id": "order_1", "status": "created"})
+    client = make_fake_razorpay_client()
     server = make_server(tmp_path, razorpay_client=client)
     add_result = await server.call_tool("add_to_cart", {"product_id": "prod_001", "quantity": 1})
     cart_id = add_result.structured_content["cart_id"]
@@ -233,12 +368,14 @@ async def test_checkout_same_idempotency_key_does_not_charge_twice(tmp_path):
     second = await server.call_tool("checkout", {"cart_id": cart_id, "idempotency_key": "idem-1"})
 
     assert first.structured_content == second.structured_content
-    assert client.order.create.call_count == 1
+    assert client.payment_link.create.call_count == 1
 
 
 @pytest.mark.asyncio
 async def test_checkout_payment_failure_returns_payment_failed(tmp_path):
-    client = make_fake_razorpay_client(raises=RuntimeError("boom"))
+    client = make_fake_razorpay_client(
+        create_raises=RuntimeError("boom"), all_response={"payment_links": []}
+    )
     server = make_server(tmp_path, razorpay_client=client)
     add_result = await server.call_tool("add_to_cart", {"product_id": "prod_001", "quantity": 1})
     cart_id = add_result.structured_content["cart_id"]
@@ -246,6 +383,7 @@ async def test_checkout_payment_failure_returns_payment_failed(tmp_path):
     result = await server.call_tool("checkout", {"cart_id": cart_id, "idempotency_key": "idem-1"})
     assert result.structured_content["ok"] is False
     assert result.structured_content["reason"] == "PAYMENT_FAILED"
+    assert cart_id not in server._pending_links
 
 
 # --- load_env: must not depend on the process CWD ------------------------
@@ -300,6 +438,7 @@ async def test_flagged_catalog_products_are_logged_for_review(tmp_path):
         cart_store=CartStore(),
         idempotency_store=IdempotencyStore(),
         ledger=spy_ledger,
+        spend_tracker=SpendTracker(tmp_path / "spend.db"),
     )
 
     spy_ledger.log.assert_called_once_with(
@@ -312,31 +451,32 @@ async def test_flagged_catalog_products_are_logged_for_review(tmp_path):
 
 @pytest.mark.asyncio
 async def test_checkout_survives_throwing_ledger_and_still_stores_idempotency_result(tmp_path):
-    client = make_fake_razorpay_client(order_response={"id": "order_1", "status": "created"})
+    client = make_fake_razorpay_client()
     broken_ledger = Mock()
     broken_ledger.log_guardrail_check = Mock()
     broken_ledger.log_checkout_result = Mock(side_effect=RuntimeError("ledger unreachable"))
 
     server = build_server(
-        catalog=list(CATALOG),
+        catalog=copy.deepcopy(CATALOG),
         config=TEST_CONFIG,
         razorpay_client=client,
         cart_store=CartStore(),
         idempotency_store=IdempotencyStore(),
         ledger=broken_ledger,
+        spend_tracker=SpendTracker(tmp_path / "spend.db"),
     )
     add_result = await server.call_tool("add_to_cart", {"product_id": "prod_001", "quantity": 1})
     cart_id = add_result.structured_content["cart_id"]
 
     result = await server.call_tool("checkout", {"cart_id": cart_id, "idempotency_key": "idem-1"})
     assert result.structured_content["ok"] is True
-    assert result.structured_content["order_id"] == "order_1"
+    assert result.structured_content["payment_link_id"] == "plink_1"
 
     # A broken ledger must not defeat the mandatory idempotency guarantee:
     # a retry with the same key must still replay, not re-charge.
     second = await server.call_tool("checkout", {"cart_id": cart_id, "idempotency_key": "idem-1"})
-    assert second.structured_content["order_id"] == "order_1"
-    assert client.order.create.call_count == 1
+    assert second.structured_content["payment_link_id"] == "plink_1"
+    assert client.payment_link.create.call_count == 1
 
 
 # --- audit fix: stock is actually re-checked and reserved at checkout ----
@@ -363,7 +503,7 @@ def make_low_stock_catalog():
 
 @pytest.mark.asyncio
 async def test_checkout_prevents_overselling_the_last_unit_across_two_carts(tmp_path):
-    client = make_fake_razorpay_client(order_response={"id": "order_1", "status": "created"})
+    client = make_fake_razorpay_client()
     server = make_server(tmp_path, catalog=make_low_stock_catalog(), razorpay_client=client)
 
     first_add = await server.call_tool("add_to_cart", {"product_id": "prod_last_unit", "quantity": 1})
@@ -377,12 +517,14 @@ async def test_checkout_prevents_overselling_the_last_unit_across_two_carts(tmp_
     assert first_checkout.structured_content["ok"] is True
     assert second_checkout.structured_content["ok"] is False
     assert second_checkout.structured_content["reason"] == "OUT_OF_STOCK"
-    assert client.order.create.call_count == 1
+    assert client.payment_link.create.call_count == 1
 
 
 @pytest.mark.asyncio
 async def test_checkout_payment_failure_releases_the_stock_reservation(tmp_path):
-    failing_client = make_fake_razorpay_client(raises=RuntimeError("boom"))
+    failing_client = make_fake_razorpay_client(
+        create_raises=RuntimeError("boom"), all_response={"payment_links": []}
+    )
     server = make_server(tmp_path, catalog=make_low_stock_catalog(), razorpay_client=failing_client)
 
     add_result = await server.call_tool("add_to_cart", {"product_id": "prod_last_unit", "quantity": 1})
@@ -420,7 +562,7 @@ async def test_checkout_rechecks_live_catalog_stock_not_the_stale_cart_snapshot(
 
 @pytest.mark.asyncio
 async def test_checkout_writes_to_ledger(tmp_path):
-    client = make_fake_razorpay_client(order_response={"id": "order_1", "status": "created"})
+    client = make_fake_razorpay_client()
     ledger = Ledger(tmp_path / "ledger.db")
     server = make_server(tmp_path, razorpay_client=client, ledger=ledger)
     add_result = await server.call_tool("add_to_cart", {"product_id": "prod_001", "quantity": 1})
@@ -430,3 +572,136 @@ async def test_checkout_writes_to_ledger(tmp_path):
     result = ledger.verify_chain()
     assert result.is_valid is True
     assert result.entries_checked >= 6  # six guardrail checks + final checkout_result
+
+
+# --- reconcile_once ------------------------------------------------------
+
+
+async def _checkout_one(server, product_id="prod_001", key="idem-1"):
+    add_result = await server.call_tool("add_to_cart", {"product_id": product_id, "quantity": 1})
+    cart_id = add_result.structured_content["cart_id"]
+    await server.call_tool("checkout", {"cart_id": cart_id, "idempotency_key": key})
+    return cart_id
+
+
+@pytest.mark.asyncio
+async def test_reconcile_once_paid_records_spend_and_clears_pending(tmp_path):
+    client = make_fake_razorpay_client()
+    server = make_server(tmp_path, razorpay_client=client)
+    cart_id = await _checkout_one(server)
+    assert cart_id in server._pending_links
+
+    client.payment_link.fetch.return_value = paid_fetch(450)
+    server._reconcile_once()
+
+    assert cart_id not in server._pending_links
+    assert server._spend_tracker.sum_since(24) == 450
+
+
+@pytest.mark.asyncio
+async def test_reconcile_once_paid_then_counts_toward_cumulative_cap(tmp_path):
+    client = make_fake_razorpay_client()
+    server = make_server(tmp_path, razorpay_client=client, config=CONFIG_WITH_CUMULATIVE_CAP)
+    await _checkout_one(server, key="idem-1")  # 450 pending
+    client.payment_link.fetch.return_value = paid_fetch(450)
+    server._reconcile_once()  # 450 now recorded as spent, cap is 1000
+
+    # a second 450 checkout would push cumulative to 900 -- still ok
+    add_result = await server.call_tool("add_to_cart", {"product_id": "prod_001", "quantity": 1})
+    second = await server.call_tool(
+        "checkout", {"cart_id": add_result.structured_content["cart_id"], "idempotency_key": "idem-2"}
+    )
+    assert second.structured_content["ok"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["expired", "cancelled"])
+async def test_reconcile_once_expired_or_cancelled_releases_stock(tmp_path, terminal):
+    client = make_fake_razorpay_client()
+    server = make_server(tmp_path, catalog=make_low_stock_catalog(), razorpay_client=client)
+    cart_id = await _checkout_one(server, product_id="prod_last_unit")
+    assert server_stock(server, "prod_last_unit") == 0
+
+    client.payment_link.fetch.return_value = {"status": terminal, "amount": 10000, "amount_paid": 0}
+    server._reconcile_once()
+
+    assert cart_id not in server._pending_links
+    assert server_stock(server, "prod_last_unit") == 1
+    assert server._spend_tracker.sum_since(24) == 0
+
+
+@pytest.mark.asyncio
+async def test_reconcile_once_partially_paid_logs_exactly_once(tmp_path):
+    client = make_fake_razorpay_client()
+    spy_ledger = Mock()
+    spy_ledger.log_guardrail_check = Mock()
+    server = make_server(tmp_path, razorpay_client=client, ledger=spy_ledger)
+    cart_id = await _checkout_one(server)
+
+    client.payment_link.fetch.return_value = {
+        "status": "partially_paid",
+        "amount": 45000,
+        "amount_paid": 20000,
+    }
+    spy_ledger.log_checkout_result.reset_mock()
+    server._reconcile_once()
+    server._reconcile_once()
+    server._reconcile_once()
+
+    partial_logs = [
+        c for c in spy_ledger.log_checkout_result.call_args_list if c.args[2].get("status") == "partially_paid"
+    ]
+    assert len(partial_logs) == 1
+    assert cart_id in server._pending_links  # stays pending, never folded away
+
+
+@pytest.mark.asyncio
+async def test_reconcile_once_pending_and_unknown_are_noops(tmp_path):
+    client = make_fake_razorpay_client()
+    server = make_server(tmp_path, razorpay_client=client)
+    cart_id = await _checkout_one(server)
+
+    for status in ("created", "issued", "weird_new_status"):
+        client.payment_link.fetch.return_value = {"status": status, "amount": 45000, "amount_paid": 0}
+        server._reconcile_once()
+        assert cart_id in server._pending_links
+    assert server._spend_tracker.sum_since(24) == 0
+
+
+# --- startup cleanup of orphaned links ----------------------------------
+
+
+def test_cancel_orphaned_payment_links_cancels_created_and_issued_only(tmp_path):
+    client = Mock()
+    client.payment_link.all.return_value = {
+        "payment_links": [
+            {"id": "plink_created", "status": "created"},
+            {"id": "plink_issued", "status": "issued"},
+            {"id": "plink_paid", "status": "paid"},
+            {"id": "plink_expired", "status": "expired"},
+        ]
+    }
+    _cancel_orphaned_payment_links(client, Ledger(tmp_path / "ledger.db"))
+
+    cancelled = {c.args[0] for c in client.payment_link.cancel.call_args_list}
+    assert cancelled == {"plink_created", "plink_issued"}
+
+
+def test_cancel_orphaned_payment_links_one_bad_cancel_does_not_stop_the_rest(tmp_path):
+    client = Mock()
+    client.payment_link.all.return_value = {
+        "payment_links": [
+            {"id": "plink_a", "status": "created"},
+            {"id": "plink_b", "status": "created"},
+        ]
+    }
+    client.payment_link.cancel.side_effect = [RuntimeError("nope"), {"status": "cancelled"}]
+    _cancel_orphaned_payment_links(client, Ledger(tmp_path / "ledger.db"))
+    assert client.payment_link.cancel.call_count == 2
+
+
+def test_cancel_orphaned_payment_links_listing_failure_is_swallowed(tmp_path):
+    client = Mock()
+    client.payment_link.all.side_effect = RuntimeError("no network at boot")
+    _cancel_orphaned_payment_links(client, Ledger(tmp_path / "ledger.db"))  # must not raise
+    client.payment_link.cancel.assert_not_called()
