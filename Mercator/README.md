@@ -76,7 +76,7 @@ open link on the Razorpay account, not only ones this deployment created.
 | Env var | Meaning | Default |
 |---|---|---|
 | `RAZORPAY_MODE` | `test` or `live` | required |
-| `CUMULATIVE_SPEND_CAP_INR` | rolling-window cap across all checkouts; `checkout` is refused (`CUMULATIVE_SPEND_CAP_EXCEEDED`) if `already_paid + this_cart` would exceed it | none in test mode; **required** when `live` |
+| `CUMULATIVE_SPEND_CAP_INR` | rolling-window cap on **confirmed-paid** spend; `checkout` is refused (`CUMULATIVE_SPEND_CAP_EXCEEDED`) if `paid_in_window + this_cart` would exceed it. Pending (unpaid) links do **not** count toward it — see the limitation note below | none in test mode; **required** when `live` |
 | `CUMULATIVE_SPEND_WINDOW_HOURS` | width of that rolling window | `24` |
 | `PAYMENT_LINK_EXPIRE_HOURS` | how long a created link stays payable (stock stays reserved that whole time) | `6` in test mode; **required** when `live` |
 | `MAX_PENDING_PAYMENT_LINKS` | `checkout` is refused (`TOO_MANY_PENDING_PAYMENT_LINKS`) while this many links are already awaiting payment | `5` |
@@ -145,6 +145,13 @@ passthrough to Fides) to confirm the chain hasn't been tampered with.
   mid-payment must request a fresh checkout. The one thing that *does*
   survive a restart is the cumulative spend total (SQLite
   `spend_tracker.db`) — resetting it would silently widen a real-money cap.
+- **The cumulative cap bounds confirmed-paid spend, not total exposure.**
+  `already_spent` is the sum of *paid* checkouts in the window (from the
+  spend tracker, written only when the reconciler sees `paid`). Links that
+  are created but not yet paid contribute nothing to the check, so several
+  can be outstanding at once each within the cap. Concurrent exposure is
+  bounded separately, by `MAX_PENDING_PAYMENT_LINKS` — worst case is roughly
+  `MAX_PENDING_PAYMENT_LINKS × CUMULATIVE_SPEND_CAP_INR` until links resolve.
 - Reconciliation is **poll-only** — no Razorpay webhooks.
 - The legacy `create_order` path has no capture simulation (and is no
   longer wired into `checkout`).

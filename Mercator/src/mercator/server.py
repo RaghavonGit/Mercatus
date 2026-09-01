@@ -462,17 +462,24 @@ def main() -> None:
     )
     catalog = load_catalog(DEFAULT_CATALOG_PATH)
 
+    # One Ledger for the whole process: fides.Ledger holds its own
+    # connection + lock, and the hash-chain has no cross-connection mutual
+    # exclusion, so a second instance on the same file could interleave
+    # appends. Startup cleanup, the checkout tool, and the reconciler all
+    # share this one.
+    ledger = Ledger(DEFAULT_LEDGER_PATH)
+
     server = build_server(
         catalog=catalog,
         config=config,
         razorpay_client=razorpay_client,
-        ledger=Ledger(DEFAULT_LEDGER_PATH),
+        ledger=ledger,
         spend_tracker=SpendTracker(DEFAULT_SPEND_TRACKER_PATH),
     )
 
     # Orphaned links from a previous run can never be reconciled by this
     # process -- cancel them before anyone can pay one.
-    _cancel_orphaned_payment_links(razorpay_client, Ledger(DEFAULT_LEDGER_PATH))
+    _cancel_orphaned_payment_links(razorpay_client, ledger)
 
     reconciler = threading.Thread(
         target=_reconcile_loop, args=(server._reconcile_once,), daemon=True, name="mercator-reconcile"

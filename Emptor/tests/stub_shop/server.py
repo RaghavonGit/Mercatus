@@ -46,7 +46,7 @@ mcp = MCPServer("stub-shop")
 _catalog: list[dict] = json.loads(CATALOG_PATH.read_text())
 _catalog_by_id = {item["id"]: item for item in _catalog}
 _cart: list[dict] = []
-_orders: dict[str, str] = {}
+_links: dict[str, dict] = {}
 
 
 @mcp.tool()
@@ -71,15 +71,24 @@ def add_to_cart(product_id: str, quantity: int) -> dict:
 
 @mcp.tool()
 def checkout(idempotency_key: str) -> dict:
-    """Finalize the cart into an order, idempotently on idempotency_key."""
-    if idempotency_key in _orders:
-        return {"order_id": _orders[idempotency_key]}
+    """Finalize the cart into a (fake) payment link, idempotently on
+    idempotency_key. Mirrors Mercator's post-migration contract: no money
+    moves here, the caller gets a pending link back."""
+    if idempotency_key in _links:
+        return _links[idempotency_key]
     if not _cart:
         raise ValueError("cannot checkout an empty cart")
-    order_id = f"stub-order-{uuid.uuid4()}"
-    _orders[idempotency_key] = order_id
+    link_id = f"stub-plink-{uuid.uuid4()}"
+    result = {
+        "ok": True,
+        "payment_link_id": link_id,
+        "payment_link_url": f"https://stub.example/pay/{link_id}",
+        "status": "pending",
+        "expire_hours": 6,
+    }
+    _links[idempotency_key] = result
     _cart.clear()
-    return {"order_id": order_id}
+    return result
 
 
 if __name__ == "__main__":
