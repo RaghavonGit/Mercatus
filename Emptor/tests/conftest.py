@@ -15,3 +15,17 @@ def _no_real_ledger_writes(monkeypatch):
     specific logging calls.
     """
     monkeypatch.setattr(run_module, "_safe_log_event", lambda *a, **k: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_llm_preflight(monkeypatch):
+    """run() calls preflight_llm() before dialing the shop -- on the path of
+    almost every test in test_run.py. Unstubbed it makes a real GET to the
+    configured LLM endpoint (which, on a dev box with Ollama running, just
+    *passes*, silently shipping the coupling). Tests that exercise the
+    preflight-failure path override this with their own monkeypatch.
+    """
+    async def _ok(*a, **k):
+        return None
+
+    monkeypatch.setattr(run_module, "preflight_llm", _ok)

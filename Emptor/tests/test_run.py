@@ -1,5 +1,6 @@
 import sys
 
+import httpx
 import pytest
 
 from fides import FidesError
@@ -10,6 +11,11 @@ from emptor.decide import DecideError
 from emptor.discover import DiscoverError
 from emptor.purchase import PendingPurchase, PurchaseError
 from emptor.run import _safe_log_event
+
+# The autouse _no_real_llm_preflight fixture (conftest.py) replaces
+# run_module.preflight_llm with a no-op. Capture the real function here, at
+# import, for the tests that exercise preflight_llm itself.
+_real_preflight_llm = run_module.preflight_llm
 
 CATALOG = [{"id": "a", "name": "Widget", "price_inr": 100, "in_stock": True}]
 LLM = LLMSettings(
@@ -46,7 +52,7 @@ def _wire_happy_path(monkeypatch, *, purchase_result=PENDING):
     async def fake_discover(session):
         return CATALOG
 
-    async def fake_decide(goal, budget_inr, catalog, api_key):
+    async def fake_decide(goal, budget_inr, catalog, llm):
         return [{"product_id": "a", "quantity": 1}]
 
     async def fake_purchase(session, validated):
@@ -136,6 +142,148 @@ async def test_run_yes_flag_skips_the_prompt_entirely(monkeypatch, capsys):
     exit_code = await run_module.run("buy a widget", 1000, CONFIG, assume_yes=True)
     assert exit_code == 0
     assert "PENDING" in capsys.readouterr().out
+
+
+# --- preflight LLM check ---------------------------------------------------
+
+
+async def test_run_blocks_when_llm_endpoint_is_unreachable(monkeypatch, capsys):
+    _wire_happy_path(monkeypatch)
+
+    async def down(*a, **k):
+        raise run_module.PreflightError(
+            "LLM endpoint http://127.0.0.1:11434/v1 is not reachable (ConnectError). "
+            "Start it, e.g. 'ollama serve'."
+        )
+
+    monkeypatch.setattr(run_module, "preflight_llm", down)
+
+    exit_code = await run_module.run("buy a widget", 1000, CONFIG, assume_yes=True)
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "BLOCKED" in err and "ollama serve" in err
+
+
+async def test_preflight_llm_warns_but_proceeds_when_model_not_listed(capsys):
+    def handler(request):
+        return httpx.Response(200, json={"object": "list", "data": [{"id": "some-other-model"}]})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    await _real_preflight_llm(CONFIG.llm, client=client)  # must not raise
+    await client.aclose()
+
+    assert "WARNING" in capsys.readouterr().err
+
+
+async def test_preflight_llm_raises_on_non_200():
+    def handler(request):
+        return httpx.Response(500, text="boom")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(run_module.PreflightError):
+        await _real_preflight_llm(CONFIG.llm, client=client)
+    await client.aclose()
+
+
+async def test_preflight_llm_passes_when_model_is_listed(capsys):
+    def handler(request):
+        return httpx.Response(200, json={"data": [{"id": "m"}, {"id": "m-small"}]})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    await _real_preflight_llm(CONFIG.llm, client=client)
+    await client.aclose()
+
+    assert "WARNING" not in capsys.readouterr().err
+
+
+# --- --picks manual override ---------------------------------------------
+
+
+async def test_run_picks_override_skips_the_llm_and_reaches_purchase(monkeypatch, capsys):
+    _wire_happy_path(monkeypatch)
+
+    async def decide_must_not_run(*a, **k):
+        raise AssertionError("decide() must not be called with --picks")
+
+    async def preflight_must_not_run(*a, **k):
+        raise AssertionError("preflight must not run with --picks")
+
+    monkeypatch.setattr(run_module, "decide", decide_must_not_run)
+    monkeypatch.setattr(run_module, "preflight_llm", preflight_must_not_run)
+
+    exit_code = await run_module.run(
+        "buy a widget",
+        1000,
+        CONFIG,
+        assume_yes=True,
+        picks_override='[{"product_id": "a", "quantity": 1}]',
+    )
+
+    assert exit_code == 0
+    assert "PENDING" in capsys.readouterr().out
+
+
+async def test_run_picks_override_invalid_json_is_blocked(monkeypatch, capsys):
+    _wire_happy_path(monkeypatch)
+    exit_code = await run_module.run(
+        "buy a widget", 1000, CONFIG, assume_yes=True, picks_override="not json"
+    )
+    assert exit_code == 1
+    assert "BLOCKED" in capsys.readouterr().err
+
+
+async def test_run_picks_override_non_array_is_blocked(monkeypatch, capsys):
+    _wire_happy_path(monkeypatch)
+    exit_code = await run_module.run(
+        "buy a widget", 1000, CONFIG, assume_yes=True, picks_override='{"product_id": "a"}'
+    )
+    assert exit_code == 1
+    assert "BLOCKED" in capsys.readouterr().err
+
+
+async def test_run_picks_override_out_of_catalog_id_still_rejected(monkeypatch, capsys):
+    _wire_happy_path(monkeypatch)
+    exit_code = await run_module.run(
+        "buy a widget",
+        1000,
+        CONFIG,
+        assume_yes=True,
+        picks_override='[{"product_id": "not-in-catalog", "quantity": 1}]',
+    )
+    assert exit_code == 1
+    assert "BLOCKED" in capsys.readouterr().err
+
+
+async def test_run_picks_override_still_prompts_for_confirmation(monkeypatch, capsys):
+    _wire_happy_path(monkeypatch)
+    monkeypatch.setattr("builtins.input", lambda _p="": "no")
+
+    exit_code = await run_module.run(
+        "buy a widget", 1000, CONFIG, picks_override='[{"product_id": "a", "quantity": 1}]'
+    )
+
+    assert exit_code == 0
+    assert "DECLINED" in capsys.readouterr().err
+
+
+async def test_run_picks_override_logs_manual_source(monkeypatch):
+    _wire_happy_path(monkeypatch)
+    events = []
+    monkeypatch.setattr(
+        run_module, "_safe_log_event", lambda data, *, event_type: events.append((event_type, data))
+    )
+
+    await run_module.run(
+        "buy a widget",
+        1000,
+        CONFIG,
+        assume_yes=True,
+        picks_override='[{"product_id": "a", "quantity": 1}]',
+    )
+
+    llm_decision = next(d for t, d in events if t == "llm_decision")
+    assert llm_decision["source"] == "manual-override"
 
 
 # --- blocked outcomes --------------------------------------------------
@@ -317,10 +465,11 @@ async def test_run_makes_exactly_one_llm_call(monkeypatch, capsys):
 def test_main_uses_default_budget_when_budget_flag_omitted(monkeypatch, capsys):
     seen = {}
 
-    async def fake_run(goal, budget_inr, config, assume_yes=False):
+    async def fake_run(goal, budget_inr, config, assume_yes=False, picks_override=None):
         seen["goal"] = goal
         seen["budget_inr"] = budget_inr
         seen["assume_yes"] = assume_yes
+        seen["picks_override"] = picks_override
         return 0
 
     monkeypatch.setattr(run_module, "load_config", lambda: CONFIG)
@@ -333,12 +482,13 @@ def test_main_uses_default_budget_when_budget_flag_omitted(monkeypatch, capsys):
     assert exc_info.value.code == 0
     assert seen["budget_inr"] == CONFIG.default_budget_inr
     assert seen["assume_yes"] is False
+    assert seen["picks_override"] is None
 
 
 def test_main_passes_yes_flag_through(monkeypatch):
     seen = {}
 
-    async def fake_run(goal, budget_inr, config, assume_yes=False):
+    async def fake_run(goal, budget_inr, config, assume_yes=False, picks_override=None):
         seen["assume_yes"] = assume_yes
         return 0
 
@@ -352,9 +502,28 @@ def test_main_passes_yes_flag_through(monkeypatch):
     assert seen["assume_yes"] is True
 
 
+def test_main_passes_picks_flag_through(monkeypatch):
+    seen = {}
+
+    async def fake_run(goal, budget_inr, config, assume_yes=False, picks_override=None):
+        seen["picks_override"] = picks_override
+        return 0
+
+    monkeypatch.setattr(run_module, "load_config", lambda: CONFIG)
+    monkeypatch.setattr(run_module, "run", fake_run)
+    monkeypatch.setattr(
+        sys, "argv", ["emptor", "buy a widget", "--picks", '[{"product_id": "a", "quantity": 1}]']
+    )
+
+    with pytest.raises(SystemExit):
+        run_module.main()
+
+    assert seen["picks_override"] == '[{"product_id": "a", "quantity": 1}]'
+
+
 def test_main_blocks_on_config_error(monkeypatch, capsys):
     def fake_load_config():
-        raise ConfigError("NIM_API_KEY is not set (check your .env file)")
+        raise ConfigError("DEFAULT_BUDGET_INR must be an integer, got 'nope'")
 
     monkeypatch.setattr(run_module, "load_config", fake_load_config)
     monkeypatch.setattr(sys, "argv", ["emptor", "buy a widget"])

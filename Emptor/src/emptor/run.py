@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 
+import httpx
 from fides import log_event
 
 from emptor.client import ShopConnection
-from emptor.config import Config, ConfigError, load_config
+from emptor.config import Config, ConfigError, LLMSettings, load_config
 from emptor.decide import DecideError, decide
 from emptor.discover import DiscoverError, discover_catalog
 from emptor.filters import pre_filter
@@ -15,6 +17,12 @@ from emptor.purchase import PendingPurchase, PurchaseError, purchase
 from emptor.validate import ValidationResult, validate_picks
 
 _ACTOR = "emptor"
+
+
+class PreflightError(RuntimeError):
+    """The LLM endpoint is not usable. Distinct from DecideError so the
+    ``except DecideError`` around the real call never swallows it, and so
+    the remediation hint ("start Ollama") differs."""
 
 
 def _safe(value: object, limit: int = 200) -> str:
@@ -115,13 +123,71 @@ def _safe_log_event(data: dict, *, event_type: str) -> None:
             pass
 
 
-async def run(goal: str, budget_inr: int, config: Config, assume_yes: bool = False) -> int:
+async def preflight_llm(llm: LLMSettings, *, client: httpx.AsyncClient | None = None) -> None:
+    """Fail fast, with the fix in the message, before the pipeline dials the
+    shop. Hard-blocks only on an unreachable endpoint. A model that isn't in
+    the ``/models`` list is a warning, not a block: Ollama lists only pulled
+    blobs, so a miss is almost always an exact-tag mismatch that would
+    wrongly stop a working setup -- and decide()'s fallback plus a
+    URL-named DecideError still cover the case where it really is missing.
+    Logs no Fides event; has no side effects.
+    """
+    owns_client = client is None
+    if client is None:
+        client = httpx.AsyncClient(timeout=5.0)
+    headers = {"Authorization": f"Bearer {llm.api_key}"} if llm.api_key else {}
+    try:
+        resp = await client.get(f"{llm.base_url}/models", headers=headers)
+    except httpx.HTTPError as exc:
+        raise PreflightError(
+            f"LLM endpoint {llm.base_url} is not reachable ({type(exc).__name__}). "
+            "Start it, e.g. 'ollama serve'."
+        ) from exc
+    finally:
+        if owns_client:
+            await client.aclose()
+
+    if resp.status_code != 200:
+        raise PreflightError(
+            f"LLM endpoint {llm.base_url} returned HTTP {resp.status_code}. "
+            "Start it, e.g. 'ollama serve'."
+        )
+
+    try:
+        listed = {m.get("id") for m in resp.json().get("data", [])}
+    except (ValueError, AttributeError, TypeError):
+        return  # unparseable list -- don't block on a format quirk
+    if listed and llm.model not in listed and llm.fallback_model not in listed:
+        print(
+            f"WARNING: neither '{llm.model}' nor '{llm.fallback_model}' is listed at "
+            f"{llm.base_url}; run 'ollama pull {llm.model}' if the next step fails.",
+            file=sys.stderr,
+        )
+
+
+async def run(
+    goal: str,
+    budget_inr: int,
+    config: Config,
+    assume_yes: bool = False,
+    picks_override: str | None = None,
+) -> int:
     purchased_pending_link: PendingPurchase | None = None
     try:
         _safe_log_event(
             {"goal": goal, "budget_inr": budget_inr, "mercator_endpoint": config.mercator_endpoint},
             event_type="goal_received",
         )
+
+        # Fail fast if the LLM is down -- before dialing the shop. Skipped
+        # entirely when --picks bypasses the LLM.
+        if picks_override is None:
+            try:
+                await preflight_llm(config.llm)
+            except PreflightError as exc:
+                print(f"BLOCKED: {_safe(exc)}", file=sys.stderr)
+                return 1
+
         async with ShopConnection(config.mercator_endpoint) as session:
             try:
                 catalog = await discover_catalog(session)
@@ -138,13 +204,28 @@ async def run(goal: str, budget_inr: int, config: Config, assume_yes: bool = Fal
                 print("BLOCKED: no in-stock products within budget", file=sys.stderr)
                 return 1
 
-            try:
-                picks = await decide(goal, budget_inr, affordable, config.llm)
-            except DecideError as exc:
-                print(f"BLOCKED: LLM decision failed: {_safe(exc)}", file=sys.stderr)
-                return 1
-
-            _safe_log_event({"goal": goal, "picks": picks}, event_type="llm_decision")
+            if picks_override is not None:
+                try:
+                    picks = json.loads(picks_override)
+                except json.JSONDecodeError:
+                    picks = None
+                if not isinstance(picks, list):
+                    print("BLOCKED: --picks is not a valid JSON array", file=sys.stderr)
+                    return 1
+                _safe_log_event(
+                    {"goal": goal, "picks": picks, "source": "manual-override"},
+                    event_type="llm_decision",
+                )
+            else:
+                try:
+                    picks = await decide(goal, budget_inr, affordable, config.llm)
+                except DecideError as exc:
+                    print(f"BLOCKED: LLM decision failed: {_safe(exc)}", file=sys.stderr)
+                    return 1
+                _safe_log_event(
+                    {"goal": goal, "picks": picks, "source": "llm"},
+                    event_type="llm_decision",
+                )
 
             validated = validate_picks(picks, affordable, budget_inr)
             _safe_log_event(
@@ -234,6 +315,15 @@ def main() -> None:
             "guardrails, and not the human who still has to pay the payment link."
         ),
     )
+    parser.add_argument(
+        "--picks",
+        default=None,
+        help=(
+            "Skip the LLM and use these picks verbatim: a JSON array like "
+            "'[{\"product_id\": \"sku-1\", \"quantity\": 2}]'. Still validated "
+            "and still needs operator confirmation. For testing/demos."
+        ),
+    )
     args = parser.parse_args()
 
     try:
@@ -244,7 +334,9 @@ def main() -> None:
 
     budget_inr = args.budget if args.budget is not None else config.default_budget_inr
 
-    exit_code = asyncio.run(run(args.goal, budget_inr, config, assume_yes=args.yes))
+    exit_code = asyncio.run(
+        run(args.goal, budget_inr, config, assume_yes=args.yes, picks_override=args.picks)
+    )
     raise SystemExit(exit_code)
 
 
