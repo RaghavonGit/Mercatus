@@ -156,10 +156,16 @@ async def test_run_blocks_when_llm_endpoint_is_unreachable(monkeypatch, capsys):
             "Start it, e.g. 'ollama serve'."
         )
 
+    class _ShopMustNotBeDialed:
+        def __init__(self, endpoint):
+            raise AssertionError("preflight must run before ShopConnection")
+
     monkeypatch.setattr(run_module, "preflight_llm", down)
+    monkeypatch.setattr(run_module, "ShopConnection", _ShopMustNotBeDialed)
 
     exit_code = await run_module.run("buy a widget", 1000, CONFIG, assume_yes=True)
 
+    # the preflight BLOCK wins -- the shop is never dialed
     assert exit_code == 1
     err = capsys.readouterr().err
     assert "BLOCKED" in err and "ollama serve" in err
