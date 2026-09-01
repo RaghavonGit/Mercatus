@@ -91,6 +91,40 @@ async def test_decide_raises_on_transport_error():
     await client.aclose()
 
 
+async def test_decide_retries_once_on_transport_error_then_succeeds():
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ReadError("connection reset", request=request)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps({"picks": []})}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    picks = await decide("buy a widget", 1000, CATALOG, "fake-key", client=client)
+    await client.aclose()
+
+    assert picks == []
+    assert calls["n"] == 2
+
+
+async def test_decide_transport_error_message_names_the_exception_type():
+    # httpx timeout/read errors can have an empty str() - the DecideError
+    # must still say what kind of failure it was.
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("", request=request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(DecideError) as exc_info:
+        await decide("buy a widget", 1000, CATALOG, "fake-key", client=client)
+    await client.aclose()
+
+    assert "ReadTimeout" in str(exc_info.value)
+
+
 async def test_decide_raises_on_valid_json_wrong_shape():
     # Valid JSON, but "picks" is a dict instead of a list - must not leak a
     # raw KeyError/TypeError from indexing into it downstream.
