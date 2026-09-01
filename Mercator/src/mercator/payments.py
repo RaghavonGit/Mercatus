@@ -20,12 +20,33 @@ API shapes verified against Razorpay's current docs:
   ``payment_link.all({"reference_id": ...})`` recovery lookup.
 
 The SDK raises on request-level failures which are caught broadly here per
-this package's fail-closed rule.
+this package's fail-closed rule — but the raw error is *always* surfaced
+(stderr + the returned ``detail`` field), never silently swallowed: a bare
+``PAYMENT_FAILED`` on a money path is undebuggable.
 """
 
+import sys
 import time
 
 import razorpay
+
+# razorpay-python's HTTP layer is ``requests``. A stale keep-alive socket
+# (first call after the server has been idle a while) surfaces as
+# ``requests.exceptions.ConnectionError`` and means the request almost
+# certainly never reached Razorpay — the one exception class it is safe to
+# retry. Imported defensively so a missing/renamed dependency degrades to
+# "no retry" rather than an ImportError.
+try:  # pragma: no cover - requests ships with razorpay
+    from requests.exceptions import ConnectionError as _RequestsConnectionError
+except Exception:  # pragma: no cover
+    _RequestsConnectionError = ()
+
+
+def _bounded(value: object, limit: int = 200) -> str:
+    """Bound and ASCII-clamp an error string — it gets printed to a
+    possibly-cp1252 console and logged to the ledger."""
+    text = str(value).encode("ascii", "backslashreplace").decode("ascii")
+    return text if len(text) <= limit else text[:limit] + "...[truncated]"
 
 
 class LiveKeyError(RuntimeError):
@@ -124,6 +145,25 @@ def _iter_payment_links(listing):
     return []
 
 
+def _recover_created_link(client, cart_id: str, amount_inr: int) -> dict | None:
+    """Look up a link by ``reference_id``. Used both to recover from an
+    ambiguous ``create`` failure (this endpoint has no idempotency-key
+    support, so an exception doesn't tell us whether the link landed) and,
+    before any retry, to make sure a retry can't duplicate a link that
+    actually did land. Returns ``None`` on lookup failure or no match —
+    caller decides what that means."""
+    try:
+        listing = client.payment_link.all({"reference_id": cart_id})
+    except Exception:  # noqa: BLE001 - fail closed; caller records the error
+        return None
+    for entry in _iter_payment_links(listing):
+        if isinstance(entry, dict) and entry.get("reference_id") == cart_id:
+            recovered = _normalize_created_link(entry, amount_inr)
+            if recovered is not None:
+                return recovered
+    return None
+
+
 def create_payment_link(
     client: razorpay.Client,
     amount_inr: int,
@@ -143,31 +183,47 @@ def create_payment_link(
     if description is not None:
         payload["description"] = description
 
-    try:
-        link = client.payment_link.create(payload)
+    last_error = "no attempt made"
+    for attempt in (1, 2):
+        try:
+            link = client.payment_link.create(payload)
+        except Exception as exc:  # noqa: BLE001 - fail closed, but always record why
+            last_error = f"create raised {type(exc).__name__}: {exc}"
+            # Did it land anyway? reference_id is the only handle we have.
+            recovered = _recover_created_link(client, cart_id, amount_inr)
+            if recovered is not None:
+                return recovered
+            # Nothing was created. Retry exactly once, and only for a
+            # transport-level failure that means the request never got
+            # through (stale keep-alive socket). Any other error is either
+            # deterministic (bad payload) or ambiguous (already handled by
+            # the recovery lookup above) — retrying would just risk a dup.
+            if (
+                attempt == 1
+                and _RequestsConnectionError
+                and isinstance(exc, _RequestsConnectionError)
+            ):
+                continue
+            break
+
         normalized = _normalize_created_link(link, amount_inr)
         if normalized is not None:
             return normalized
-    except Exception:
-        pass
 
-    # The create call has no idempotency-key support, so an exception or a
-    # malformed response is ambiguous: the link may already exist
-    # server-side. Look it up by reference_id before declaring a failure —
-    # returning a false PAYMENT_FAILED here would both lose a real link and
-    # risk a duplicate on retry.
-    try:
-        listing = client.payment_link.all({"reference_id": cart_id})
-    except Exception:
-        return {"ok": False, "reason": "PAYMENT_FAILED"}
+        # The call returned cleanly but the response is unusable. It may
+        # have half-succeeded, so don't retry the create — try recovery,
+        # then give up.
+        last_error = f"create returned an unusable response: {_bounded(link)}"
+        recovered = _recover_created_link(client, cart_id, amount_inr)
+        if recovered is not None:
+            return recovered
+        break
 
-    for entry in _iter_payment_links(listing):
-        if isinstance(entry, dict) and entry.get("reference_id") == cart_id:
-            recovered = _normalize_created_link(entry, amount_inr)
-            if recovered is not None:
-                return recovered
-
-    return {"ok": False, "reason": "PAYMENT_FAILED"}
+    print(
+        f"mercator: payment link creation failed for cart {cart_id} - {_bounded(last_error, 400)}",
+        file=sys.stderr,
+    )
+    return {"ok": False, "reason": "PAYMENT_FAILED", "detail": _bounded(last_error)}
 
 
 def fetch_payment_link(client: razorpay.Client, payment_link_id: str) -> dict:
@@ -182,7 +238,14 @@ def fetch_payment_link(client: razorpay.Client, payment_link_id: str) -> dict:
     }
     try:
         link = client.payment_link.fetch(payment_link_id)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - fail closed toward "keep polling"
+        # The reconciler will retry next tick; still surface it, so a link
+        # that is silently un-pollable doesn't just look "pending" forever.
+        print(
+            f"mercator: could not fetch payment link {payment_link_id} - "
+            f"{_bounded(f'{type(exc).__name__}: {exc}')}",
+            file=sys.stderr,
+        )
         return unknown
 
     if not isinstance(link, dict):

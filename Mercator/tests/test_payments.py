@@ -226,7 +226,10 @@ def test_create_payment_link_create_raises_recovery_finds_nothing_returns_paymen
         all_return={"payment_links": []},
     )
     result = create_payment_link(client, amount_inr=450, cart_id="cart_abc", expire_hours=6)
-    assert result == {"ok": False, "reason": "PAYMENT_FAILED"}
+    assert result["ok"] is False
+    assert result["reason"] == "PAYMENT_FAILED"
+    # the swallowed cause is now surfaced, not lost
+    assert "RuntimeError" in result["detail"] and "timeout" in result["detail"]
 
 
 def test_create_payment_link_create_raises_recovery_also_raises_returns_payment_failed():
@@ -235,7 +238,8 @@ def test_create_payment_link_create_raises_recovery_also_raises_returns_payment_
         all_raises=RuntimeError("also down"),
     )
     result = create_payment_link(client, amount_inr=450, cart_id="cart_abc", expire_hours=6)
-    assert result == {"ok": False, "reason": "PAYMENT_FAILED"}
+    assert result["ok"] is False
+    assert result["reason"] == "PAYMENT_FAILED"
 
 
 def test_create_payment_link_recovery_ignores_entries_for_a_different_cart():
@@ -248,7 +252,68 @@ def test_create_payment_link_recovery_ignores_entries_for_a_different_cart():
         },
     )
     result = create_payment_link(client, amount_inr=450, cart_id="cart_abc", expire_hours=6)
-    assert result == {"ok": False, "reason": "PAYMENT_FAILED"}
+    assert result["ok"] is False
+    assert result["reason"] == "PAYMENT_FAILED"
+
+
+def test_create_payment_link_retries_once_on_a_stale_connection_then_succeeds():
+    from requests.exceptions import ConnectionError as RequestsConnectionError
+
+    client = make_link_client(
+        create_raises=[
+            RequestsConnectionError("Connection aborted, RemoteDisconnected"),
+            {"id": "plink_ok", "short_url": "https://rzp.io/i/ok", "status": "created"},
+        ],
+        all_return={"payment_links": []},  # nothing landed on the first attempt
+    )
+    result = create_payment_link(client, amount_inr=450, cart_id="cart_abc", expire_hours=6)
+    assert result["ok"] is True
+    assert result["payment_link_id"] == "plink_ok"
+    assert client.payment_link.create.call_count == 2
+
+
+def test_create_payment_link_connection_error_but_link_already_landed_does_not_retry():
+    from requests.exceptions import ConnectionError as RequestsConnectionError
+
+    client = make_link_client(
+        create_raises=RequestsConnectionError("read timed out after send"),
+        all_return={
+            "payment_links": [
+                {"id": "plink_landed", "short_url": "https://rzp.io/i/l", "reference_id": "cart_abc"}
+            ]
+        },
+    )
+    result = create_payment_link(client, amount_inr=450, cart_id="cart_abc", expire_hours=6)
+    assert result["ok"] is True
+    assert result["payment_link_id"] == "plink_landed"
+    # recovery found it -> must NOT create a second link
+    assert client.payment_link.create.call_count == 1
+
+
+def test_create_payment_link_retries_at_most_once_on_repeated_connection_errors():
+    from requests.exceptions import ConnectionError as RequestsConnectionError
+
+    client = make_link_client(
+        create_raises=[
+            RequestsConnectionError("down"),
+            RequestsConnectionError("still down"),
+        ],
+        all_return={"payment_links": []},
+    )
+    result = create_payment_link(client, amount_inr=450, cart_id="cart_abc", expire_hours=6)
+    assert result["ok"] is False
+    assert result["reason"] == "PAYMENT_FAILED"
+    assert client.payment_link.create.call_count == 2
+
+
+def test_create_payment_link_non_connection_error_is_not_retried():
+    client = make_link_client(
+        create_raises=[ValueError("bad payload"), {"id": "x", "short_url": "y"}],
+        all_return={"payment_links": []},
+    )
+    result = create_payment_link(client, amount_inr=450, cart_id="cart_abc", expire_hours=6)
+    assert result["ok"] is False
+    assert client.payment_link.create.call_count == 1
 
 
 @pytest.mark.parametrize(
