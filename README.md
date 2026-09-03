@@ -9,6 +9,8 @@ records what actually happened.
 Emptor  (buyer)  ──MCP──>  Mercator  (merchant)  ──writes to──>  Fides  (ledger)
    │                              │
    └── one LLM call, ever         └── zero LLM calls, ever — fully deterministic
+
+Forum  (demo dashboard)  ── drives the whole flow from one web page
 ```
 
 ## Components
@@ -18,28 +20,44 @@ Emptor  (buyer)  ──MCP──>  Mercator  (merchant)  ──writes to──> 
 | **[Emptor](Emptor/)** | Autonomous shopper agent. Given a goal in plain English and a budget, connects to any MCP-compatible shop, reads its catalog, and decides what to buy via a single LLM call (a local model via Ollama by default; provider-pluggable). Never decides whether a purchase is *allowed*. | [Emptor/README.md](Emptor/README.md) |
 | **[Mercator](Mercator/)** | Merchant MCP server. Hosts a catalog and enforces every purchase rule (stock, allowlist, per-transaction + cumulative spend caps, pending-link limit, idempotency) deterministically, server-side. Zero LLM calls. `checkout` creates a Razorpay **Payment Link** the buyer pays themselves; an in-process poller reconciles the outcome. | [Mercator/README.md](Mercator/README.md) |
 | **[Fides](Fides/)** | Dependency-free, tamper-evident trust ledger. Records events from Emptor and Mercator as a SHA256 hash-linked chain and can prove — not just claim — whether the chain has been altered. Standard library only. | [Fides/README.md](Fides/README.md) |
+| **[Forum](Forum/)** | Local demo dashboard (FastAPI + one static page). Runs the whole flow from a single screen and shows the catalog, the model's pick **and its stated reason**, the shop's re-validation, the payment link with live PENDING→PAID status, both Fides chains, and the spend tracker. A presentation layer — **not** a security boundary. | [Forum/README.md](Forum/README.md) |
 
 ## Status
 
-All three packages are independently built and tested (526 tests combined —
-338 Mercator, 126 Emptor, 62 Fides; plus 2 `@live` Emptor tests run
-pre-demo). An earlier end-to-end run exercised the
-old order-creation path live: a real MCP connection, a real LLM decision, a
-real Razorpay test-mode order, a real chain-verified Fides ledger entry, and
-a real server-side rejection (over-budget, blocked by the spend-cap
-guardrail).
+All four packages are independently built and tested (**542 tests combined**
+— 338 Mercator, 128 Emptor, 62 Fides, 14 Forum; plus 2 `@live` Emptor tests
+run pre-demo).
 
-The **real-money upgrade** is now built (Payment Links, cumulative spend
-cap, pending-link limit, durable spend tracker, in-process reconciler,
-Emptor operator-approval checkpoint) and the **decision LLM now runs on a
-local model via Ollama** (provider-pluggable; no cloud dependency, no
-disappearing preview models). It passes the full mocked test matrix; a
-fresh live test-mode verification against the Payment Link flow is the next
-step — and `RAZORPAY_MODE=live` stays off until that passes.
+The **real-money upgrade** (Payment Links, cumulative spend cap,
+pending-link limit, durable spend tracker, in-process reconciler, Emptor
+operator-approval checkpoint) and the move of the **decision LLM to a local
+model via Ollama** (provider-pluggable; no cloud dependency, no disappearing
+preview models) are both **merged and live-verified in Razorpay test mode**:
+a real Payment Link paid in a browser flips to `paid` on its own, the
+reconciler records it, the spend tracker increments, and both Fides chains
+stay verified. `RAZORPAY_MODE=live` remains gated on two hardening items
+(see `Mercator/CLAUDE.md`).
 
-**Multi-item purchases** now work end to end: Emptor threads one `cart_id`
+The decision call now also returns the model's **reasoning** for its pick,
+recorded in the `llm_decision` ledger event and shown by Forum.
+
+**Multi-item purchases** work end to end: Emptor threads one `cart_id`
 across every item and Mercator checks the whole cart out as one Payment
 Link.
+
+## Demo UI
+
+For a watchable run — or for anyone who isn't going to use a terminal —
+**[Forum](Forum/)** serves a dashboard:
+
+```bash
+cd Forum && uv run forum      # -> http://127.0.0.1:8100
+```
+
+It starts Mercator for you, runs the pipeline with a live-animating
+timeline, shows the model's pick and its reason, opens the real Razorpay
+test-mode link, and flips the status to **PAID** on its own once you pay it.
+See [Forum/README.md](Forum/README.md) for the walkthrough.
 
 ## Design principle
 
@@ -64,6 +82,7 @@ git clone <this-repo-url> Mercatus
 cd Mercatus/Fides    && uv sync
 cd ../Mercator        && uv sync
 cd ../Emptor          && uv sync
+cd ../Forum           && uv sync   # optional — the demo dashboard
 ```
 
 Each package has its own `.env.example` documenting the environment
@@ -96,10 +115,13 @@ uv run emptor "a fantasy novel to read" --budget 500
 # browser, and Mercator's reconciler logs the final outcome within ~45s.
 ```
 
+Or skip the three terminals and use the dashboard — see **[Demo UI](#demo-ui)**.
+
 See each package's own README for full details — Mercator's covers the
 transport flag and the real-money config (`RAZORPAY_MODE`, the spend/link
 bounds), Emptor's covers the LLM setup, this walkthrough, the
-operator-approval prompt, `--yes`, and `--picks`.
+operator-approval prompt, `--yes`, and `--picks`, Forum's covers the
+dashboard and its demo walkthrough.
 
 ## License
 
