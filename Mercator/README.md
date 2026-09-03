@@ -12,7 +12,7 @@ Zero LLM calls. Every guardrail is deterministic, server-side, fail-closed.
 All core modules are built and tested: guardrails, idempotency, catalog
 sanitization, cart, config, payments, the durable spend tracker, ledger,
 and the MCP server itself (three tools: `list_products`, `add_to_cart`,
-`checkout`) plus the in-process payment-link reconciler. 334 tests passing.
+`checkout`) plus the in-process payment-link reconciler. 338 tests passing.
 
 - **Real-money path (Payment Links)**: `checkout` now creates a Razorpay
   **Payment Link** the buyer pays themselves in a browser — no
