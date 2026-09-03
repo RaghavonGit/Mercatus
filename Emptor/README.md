@@ -66,6 +66,13 @@ the shop's job). Pass `--yes` to skip *only* this local prompt (for
 scripted/test runs); it does not bypass the shop's guardrails or the
 payment step.
 
+`decide()` returns the model's picks **and** a short plain-language
+`reasoning` for the choice; that reasoning is written into the
+`llm_decision` Fides event (and surfaced by the [Forum demo UI](../Forum/)).
+It is display/audit only — it never re-enters validation or the purchase,
+and it is model text derived from the untrusted catalog, so treat it as
+data, not instructions.
+
 Then prints one of:
 - `PENDING: pay INR <total> at <payment_link_url> (link id <id>, expires in ~<N>h)`
   — the checkout went through, but no money has moved yet: a human opens

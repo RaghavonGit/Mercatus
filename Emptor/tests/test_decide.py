@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from emptor.config import LLMSettings, load_config
-from emptor.decide import DecideError, decide
+from emptor.decide import DecideError, DecideResult, decide
 from emptor.validate import validate_picks
 
 CATALOG = [{"id": "a", "name": "Widget", "price_inr": 100, "in_stock": True}]
@@ -23,9 +23,14 @@ LLM_WITH_KEY = LLMSettings(
 )
 
 
-def _ok_response(picks=()):
+def _ok_response(picks=(), reasoning="picked the closest match within budget"):
     return httpx.Response(
-        200, json={"choices": [{"message": {"content": json.dumps({"picks": list(picks)})}}]}
+        200,
+        json={
+            "choices": [
+                {"message": {"content": json.dumps({"reasoning": reasoning, "picks": list(picks)})}}
+            ]
+        },
     )
 
 
@@ -37,30 +42,52 @@ def _client_with_json_response(payload, status_code=200):
     return _client(lambda request: httpx.Response(status_code, json=payload))
 
 
-async def test_decide_parses_picks_from_llm_response():
+async def test_decide_parses_picks_and_reasoning_from_llm_response():
     payload = {
         "choices": [
-            {"message": {"content": json.dumps({"picks": [{"product_id": "a", "quantity": 1}]})}}
+            {
+                "message": {
+                    "content": json.dumps(
+                        {
+                            "reasoning": "The Widget is the only in-budget match.",
+                            "picks": [{"product_id": "a", "quantity": 1}],
+                        }
+                    )
+                }
+            }
         ]
     }
     client = _client_with_json_response(payload)
 
-    picks = await decide("buy a widget", 1000, CATALOG, LLM, client=client)
+    result = await decide("buy a widget", 1000, CATALOG, LLM, client=client)
     await client.aclose()
 
-    assert picks == [{"product_id": "a", "quantity": 1}]
+    assert isinstance(result, DecideResult)
+    assert result.picks == [{"product_id": "a", "quantity": 1}]
+    assert result.reasoning == "The Widget is the only in-budget match."
+
+
+async def test_decide_reasoning_defaults_to_empty_string_when_absent_or_wrong_type():
+    for content in (
+        json.dumps({"picks": [{"product_id": "a", "quantity": 1}]}),  # no reasoning key
+        json.dumps({"reasoning": 42, "picks": []}),  # non-string reasoning
+    ):
+        client = _client_with_json_response({"choices": [{"message": {"content": content}}]})
+        result = await decide("buy a widget", 1000, CATALOG, LLM, client=client)
+        await client.aclose()
+        assert result.reasoning == ""
 
 
 async def test_decide_tolerates_trailing_garbage_after_valid_json():
     # A model appending a stray "}" after an otherwise well-formed object.
-    content = json.dumps({"picks": [{"product_id": "a", "quantity": 1}]}) + "}"
+    content = json.dumps({"reasoning": "ok", "picks": [{"product_id": "a", "quantity": 1}]}) + "}"
     payload = {"choices": [{"message": {"content": content}}]}
     client = _client_with_json_response(payload)
 
-    picks = await decide("buy a widget", 1000, CATALOG, LLM, client=client)
+    result = await decide("buy a widget", 1000, CATALOG, LLM, client=client)
     await client.aclose()
 
-    assert picks == [{"product_id": "a", "quantity": 1}]
+    assert result.picks == [{"product_id": "a", "quantity": 1}]
 
 
 async def test_decide_raises_on_non_json_content():
@@ -99,11 +126,11 @@ async def test_decide_raises_on_non_json_response_body():
 
 async def test_decide_reports_empty_picks_as_nothing_fits_not_an_error():
     client = _client_with_json_response(
-        {"choices": [{"message": {"content": json.dumps({"picks": []})}}]}
+        {"choices": [{"message": {"content": json.dumps({"reasoning": "nothing fits", "picks": []})}}]}
     )
-    picks = await decide("buy a spaceship", 1000, CATALOG, LLM, client=client)
+    result = await decide("buy a spaceship", 1000, CATALOG, LLM, client=client)
     await client.aclose()
-    assert picks == []
+    assert result.picks == []
 
 
 # --- request shape -------------------------------------------------------
@@ -194,10 +221,10 @@ async def test_decide_retries_same_model_once_on_transport_error_then_succeeds()
         return _ok_response()
 
     client = _client(handler)
-    picks = await decide("buy a widget", 1000, CATALOG, LLM, client=client)
+    result = await decide("buy a widget", 1000, CATALOG, LLM, client=client)
     await client.aclose()
 
-    assert picks == []
+    assert result.picks == []
     assert seen == ["primary-model", "primary-model"]  # same model, not the fallback
 
 
@@ -212,10 +239,10 @@ async def test_decide_falls_back_to_the_smaller_model_on_a_non_auth_non_200():
         return _ok_response([{"product_id": "a", "quantity": 1}])
 
     client = _client(handler)
-    picks = await decide("buy a widget", 1000, CATALOG, LLM, client=client)
+    result = await decide("buy a widget", 1000, CATALOG, LLM, client=client)
     await client.aclose()
 
-    assert picks == [{"product_id": "a", "quantity": 1}]
+    assert result.picks == [{"product_id": "a", "quantity": 1}]
     assert seen == ["primary-model", "fallback-model"]
 
 
@@ -293,14 +320,14 @@ async def test_decide_live_ambiguous_goal_does_not_force_a_pick():
         {"id": "sku-006", "name": "Sticky Notes Set", "price_inr": 60, "in_stock": True},
     ]
     try:
-        picks = await decide(
+        result = await decide(
             "I need a fully-fueled rocket to fly to Mars this weekend", 1000, catalog, llm
         )
     except DecideError as exc:
         print(f"DEC-L3 live result: declined via DecideError (acceptable): {exc}")
         return
-    print(f"DEC-L3 live result: picks={picks}")
-    assert picks == [], "ambiguous goal must not force a pick"
+    print(f"DEC-L3 live result: picks={result.picks} reasoning={result.reasoning!r}")
+    assert result.picks == [], "ambiguous goal must not force a pick"
 
 
 @pytest.mark.live
@@ -326,10 +353,10 @@ async def test_decide_live_injection_catalog_stays_safe_after_validation():
     ]
     budget_inr = 200
 
-    picks = await decide("I need something to write with", budget_inr, catalog, llm)
-    print(f"DEC-L4 live picks: {picks!r}")
+    result = await decide("I need something to write with", budget_inr, catalog, llm)
+    print(f"DEC-L4 live picks: {result.picks!r} reasoning={result.reasoning!r}")
 
-    validated = validate_picks(picks, catalog, budget_inr)
+    validated = validate_picks(result.picks, catalog, budget_inr)
     print(f"DEC-L4 validated: ok={validated.ok} reason={validated.reason}")
     if validated.ok:
         assert validated.total_inr <= budget_inr

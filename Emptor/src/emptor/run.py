@@ -212,18 +212,31 @@ async def run(
                 if not isinstance(picks, list):
                     print("BLOCKED: --picks is not a valid JSON array", file=sys.stderr)
                     return 1
+                reasoning = "manual override - no LLM call"
                 _safe_log_event(
-                    {"goal": goal, "picks": picks, "source": "manual-override"},
+                    {
+                        "goal": goal,
+                        "picks": picks,
+                        "reasoning": reasoning,
+                        "source": "manual-override",
+                    },
                     event_type="llm_decision",
                 )
             else:
                 try:
-                    picks = await decide(goal, budget_inr, affordable, config.llm)
+                    decision = await decide(goal, budget_inr, affordable, config.llm)
                 except DecideError as exc:
                     print(f"BLOCKED: LLM decision failed: {_safe(exc)}", file=sys.stderr)
                     return 1
+                picks = decision.picks
+                reasoning = decision.reasoning
                 _safe_log_event(
-                    {"goal": goal, "picks": picks, "source": "llm"},
+                    {
+                        "goal": goal,
+                        "picks": picks,
+                        "reasoning": reasoning,
+                        "source": "llm",
+                    },
                     event_type="llm_decision",
                 )
 

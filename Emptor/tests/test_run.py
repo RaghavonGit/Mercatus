@@ -7,7 +7,7 @@ from fides import FidesError
 
 import emptor.run as run_module
 from emptor.config import Config, ConfigError, LLMSettings
-from emptor.decide import DecideError
+from emptor.decide import DecideError, DecideResult
 from emptor.discover import DiscoverError
 from emptor.purchase import PendingPurchase, PurchaseError
 from emptor.run import _safe_log_event
@@ -53,7 +53,7 @@ def _wire_happy_path(monkeypatch, *, purchase_result=PENDING):
         return CATALOG
 
     async def fake_decide(goal, budget_inr, catalog, llm):
-        return [{"product_id": "a", "quantity": 1}]
+        return DecideResult(picks=[{"product_id": "a", "quantity": 1}], reasoning="test reason")
 
     async def fake_purchase(session, validated):
         if isinstance(purchase_result, Exception):
@@ -290,6 +290,21 @@ async def test_run_picks_override_logs_manual_source(monkeypatch):
 
     llm_decision = next(d for t, d in events if t == "llm_decision")
     assert llm_decision["source"] == "manual-override"
+    assert "no LLM call" in llm_decision["reasoning"]
+
+
+async def test_run_llm_path_logs_the_models_reasoning(monkeypatch):
+    _wire_happy_path(monkeypatch)  # fake_decide returns reasoning="test reason"
+    events = []
+    monkeypatch.setattr(
+        run_module, "_safe_log_event", lambda data, *, event_type: events.append((event_type, data))
+    )
+
+    await run_module.run("buy a widget", 1000, CONFIG, assume_yes=True)
+
+    llm_decision = next(d for t, d in events if t == "llm_decision")
+    assert llm_decision["source"] == "llm"
+    assert llm_decision["reasoning"] == "test reason"
 
 
 # --- blocked outcomes --------------------------------------------------
@@ -329,8 +344,8 @@ async def test_run_blocks_when_validation_fails(monkeypatch, capsys):
     async def fake_discover(session):
         return CATALOG
 
-    async def fake_decide(goal, budget_inr, catalog, api_key):
-        return [{"product_id": "does-not-exist", "quantity": 1}]
+    async def fake_decide(goal, budget_inr, catalog, llm):
+        return DecideResult(picks=[{"product_id": "does-not-exist", "quantity": 1}], reasoning="x")
 
     monkeypatch.setattr(run_module, "discover_catalog", fake_discover)
     monkeypatch.setattr(run_module, "decide", fake_decide)
@@ -451,9 +466,9 @@ async def test_run_makes_exactly_one_llm_call(monkeypatch, capsys):
     async def fake_discover(session):
         return CATALOG
 
-    async def fake_decide(goal, budget_inr, catalog, api_key):
+    async def fake_decide(goal, budget_inr, catalog, llm):
         call_count["n"] += 1
-        return [{"product_id": "a", "quantity": 1}]
+        return DecideResult(picks=[{"product_id": "a", "quantity": 1}], reasoning="one call")
 
     async def fake_purchase(session, validated):
         return PENDING
