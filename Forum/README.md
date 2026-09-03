@@ -44,6 +44,13 @@ Open <http://127.0.0.1:8100>. The status pills top-right show whether
 Mercator and Ollama are up; if Mercator is down, the **Start Mercator**
 button spawns it for you (Ollama you start yourself).
 
+For a clean recording (empty ledger panel and a ₹0 spend gauge), delete the
+three state files first:
+
+```bash
+rm -f Mercator/ledger.db Mercator/spend_tracker.db Forum/forum_ledger.db
+```
+
 ## Demo walkthrough
 
 1. Type a goal (e.g. *"a fantasy novel for a teenager"*) and a budget, click
@@ -81,5 +88,4 @@ the pick still goes through the shop's validation and the same payment flow.
 ```bash
 cd Forum
 uv run pytest -q          # smoke tests (stubbed shop, fixture ledger, mocked Razorpay)
-uv run pytest -q -m live  # needs a running Mercator + Ollama
 ```

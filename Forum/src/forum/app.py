@@ -162,7 +162,7 @@ async def api_health() -> dict:
             "endpoint": CONFIG.mercator_endpoint,
         },
         "ollama": {
-            **system.ollama_status(llm.base_url, [llm.model, llm.fallback_model]),
+            **await system.ollama_status(llm.base_url, [llm.model, llm.fallback_model]),
             "base_url": llm.base_url,
             "model": llm.model,
         },

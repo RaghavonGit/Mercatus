@@ -7,6 +7,7 @@ detected and reported (with the fix to run).
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
@@ -30,9 +31,10 @@ async def mercator_reachable(endpoint: str, timeout: float = 3.0) -> bool:
         return False
 
 
-def ollama_status(base_url: str, want_models: list[str], timeout: float = 3.0) -> dict:
+async def ollama_status(base_url: str, want_models: list[str], timeout: float = 3.0) -> dict:
     try:
-        r = httpx.get(f"{base_url}/models", timeout=timeout)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.get(f"{base_url}/models")
         r.raise_for_status()
         ids = {m.get("id") for m in r.json().get("data", [])}
     except Exception as exc:  # noqa: BLE001
@@ -84,7 +86,7 @@ async def wait_until_reachable(endpoint: str, deadline_s: float = 25.0) -> bool:
     while time.monotonic() - start < deadline_s:
         if await mercator_reachable(endpoint):
             return True
-        time.sleep(1.0)
+        await asyncio.sleep(1.0)
     return False
 
 
