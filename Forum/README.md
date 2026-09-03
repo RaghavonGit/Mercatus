@@ -1,0 +1,85 @@
+# Forum — the Mercatus demo dashboard
+
+Forum is a local web page that runs the whole Mercatus flow end to end so
+you can *watch* it, instead of driving three terminals by hand. It shows:
+
+- the goal + budget you give the shopper
+- the shop's catalog and what's within budget
+- **which item the local LLM picked, and the reason it gave**
+- the shop's independent re-validation of that pick
+- the real Razorpay payment link, with its status flipping
+  **PENDING → PAID** on its own once you pay it
+- both Fides ledgers (Emptor's and Mercator's), live, each with a
+  "chain verified" indicator
+- the durable spend tracker
+
+Forum is a **presentation layer, not a security boundary.** Every
+money-safety rule is still enforced by Mercator; Forum just reuses Emptor's
+pipeline steps and reads the other packages' state.
+
+## Prerequisites
+
+- The other three packages present in the monorepo layout
+  (`../Emptor`, `../Mercator`, `../Fides`).
+- **Ollama** running with the models pulled:
+  ```
+  ollama serve
+  ollama pull qwen2.5:7b-instruct
+  ollama pull qwen2.5:3b-instruct
+  ```
+- `Mercator/.env` set for test mode (`RAZORPAY_MODE=test`,
+  `RAZORPAY_KEY_ID`/`_SECRET`, and `MCP_TRANSPORT=streamable-http`).
+- `Forum/.env` — copy `.env.example`, paste the **same** test-mode Razorpay
+  keys as `Mercator/.env` (Forum needs its own client only to poll a
+  payment link's status).
+
+## Run
+
+```bash
+cd Forum
+uv run forum
+```
+
+Open <http://127.0.0.1:8100>. The status pills top-right show whether
+Mercator and Ollama are up; if Mercator is down, the **Start Mercator**
+button spawns it for you (Ollama you start yourself).
+
+## Demo walkthrough
+
+1. Type a goal (e.g. *"a fantasy novel for a teenager"*) and a budget, click
+   **Shop**.
+2. The timeline animates: connect → read catalog → the model chooses (its
+   reasoning appears in a quote) → the shop re-checks the pick → a payment
+   link is created. No money has moved.
+3. Click **Pay now**. On Razorpay's test page use card
+   `5267 3181 8797 5449`, any future expiry, any CVV, OTP `1234`.
+   (`4111 1111 1111 1111` is rejected as an international card on this
+   account.)
+4. Back on the dashboard the badge flips **PENDING → PAID** within a few
+   seconds — that's Forum polling the link status directly, ahead of
+   Mercator's ~45s reconciler.
+5. The ledger panel fills in as it goes; after payment Mercator's reconciler
+   adds its own `checkout_result` row. Both chain badges stay ✓. The spend
+   gauge ticks up.
+
+To skip the LLM, tick **Choose the item myself** and pick from the catalog —
+the pick still goes through the shop's validation and the same payment flow.
+
+## Known limitations
+
+- **Test mode only.** Forum refuses to start if `RAZORPAY_MODE` isn't
+  `test`.
+- **No auth, single session.** It's a local demo tool, not a service.
+- Emptor and Mercator keep **separate** ledger files (Mercator hardcodes
+  its path); Forum shows both rather than one merged chain.
+- The catalog is Mercator's static fixture; there's no product management.
+- A page reload loses the in-page run state (the ledger + payment status
+  are re-read from disk, so they survive).
+
+## Tests
+
+```bash
+cd Forum
+uv run pytest -q          # smoke tests (stubbed shop, fixture ledger, mocked Razorpay)
+uv run pytest -q -m live  # needs a running Mercator + Ollama
+```

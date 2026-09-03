@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mercatus - autonomous shopping, demo</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">Mercatus</span>
+      <span class="tagline">an autonomous shopper (Emptor) buys from a shop (Mercator) that enforces every rule, and a tamper-evident ledger (Fides) records it</span>
+    </div>
+    <div class="pills" id="pills">
+      <span class="pill" id="pill-mercator" data-state="unknown">Mercator <b>&hellip;</b></span>
+      <span class="pill" id="pill-ollama" data-state="unknown">Ollama <b>&hellip;</b></span>
+      <button id="btn-start" class="pill-btn" hidden>Start Mercator</button>
+    </div>
+  </header>
+
+  <main class="grid">
+    <!-- left: run + timeline + payment + spend -->
+    <section class="col col-left">
+      <div class="card run-card">
+        <label class="field">
+          <span>What should Emptor buy?</span>
+          <input id="goal" type="text" value="a fantasy novel for a teenager" autocomplete="off" />
+        </label>
+        <label class="field field-budget">
+          <span>Budget (INR)</span>
+          <input id="budget" type="number" value="800" min="1" step="50" />
+        </label>
+        <label class="toggle">
+          <input type="checkbox" id="manual" />
+          <span>Choose the item myself (skip the LLM)</span>
+        </label>
+        <div id="manual-box" hidden>
+          <select id="manual-product"></select>
+          <input id="manual-qty" type="number" value="1" min="1" max="10" />
+        </div>
+        <button id="btn-shop" class="btn-primary">Shop</button>
+      </div>
+
+      <ol class="timeline" id="timeline">
+        <li data-step="connect"><span class="dot"></span><div class="body"><h4>Connect to the shop</h4><p class="detail"></p></div></li>
+        <li data-step="catalog"><span class="dot"></span><div class="body"><h4>Read the catalog</h4><p class="detail"></p></div></li>
+        <li data-step="decision"><span class="dot"></span><div class="body"><h4>The model chooses</h4><p class="detail"></p><blockquote class="reason" hidden></blockquote></div></li>
+        <li data-step="validation"><span class="dot"></span><div class="body"><h4>Independent re-check</h4><p class="detail"></p><ul class="checks"></ul></div></li>
+        <li data-step="pending"><span class="dot"></span><div class="body"><h4>Payment link created</h4><p class="detail"></p></div></li>
+      </ol>
+
+      <div class="card payment-card" id="payment-card" hidden>
+        <div class="pay-head">
+          <span class="badge" id="pay-badge" data-status="pending">PENDING</span>
+          <span class="pay-amount" id="pay-amount"></span>
+        </div>
+        <p class="pay-sub">No money has moved yet &mdash; a human opens the link and pays. Mercator's reconciler then confirms it on its own.</p>
+        <div class="pay-actions">
+          <a id="pay-link" class="btn-pay" target="_blank" rel="noopener">Pay now &rarr;</a>
+          <button id="pay-refresh" class="btn-ghost">Check status</button>
+        </div>
+        <p class="pay-meta" id="pay-meta"></p>
+      </div>
+
+      <div class="card spend-card">
+        <div class="spend-head"><span>Confirmed spend, last <b id="spend-window">24</b>h</span><span id="spend-figure">&mdash;</span></div>
+        <div class="spend-bar"><div class="spend-fill" id="spend-fill"></div></div>
+        <p class="spend-sub" id="spend-sub"></p>
+      </div>
+    </section>
+
+    <!-- right: the two ledgers -->
+    <section class="col col-right">
+      <div class="card ledger-card">
+        <div class="ledger-head">
+          <h3>Fides ledger</h3>
+          <div class="chain-badges">
+            <span class="chain" id="chain-emptor" data-valid="unknown">emptor chain</span>
+            <span class="chain" id="chain-mercator" data-valid="unknown">mercator chain</span>
+          </div>
+        </div>
+        <ol class="events" id="events"></ol>
+        <p class="ledger-empty" id="ledger-empty">Events appear here as the run progresses. Each is hash-chained &mdash; neither party can rewrite history.</p>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
