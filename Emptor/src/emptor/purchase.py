@@ -25,6 +25,20 @@ class PendingPurchase:
     expire_hours: int | None
 
 
+@dataclass(frozen=True)
+class SettledPurchase:
+    """The other successful outcome: the shop settled the checkout
+    immediately with **no payment link to pay** -- it drew a pre-funded
+    balance it holds (Mercator's autopay envelope). Money HAS moved. Emptor
+    does not control or authorize this -- the shop decides, deterministically,
+    server-side; Emptor only reports what came back. ``settled_via`` is
+    shop-supplied text, display-only."""
+
+    total_inr: int
+    settled_via: str
+    amount_inr: int | None
+
+
 def _safe(value: object, limit: int = 200) -> str:
     text = str(value)
     if len(text) > limit:
@@ -86,6 +100,25 @@ def _cart_id_from_result(result: Any) -> str | None:
     return payload.get("cart_id") if payload else None
 
 
+def _settled_from_result(result: Any, total_inr: int) -> SettledPurchase | None:
+    """A shop that settled the checkout itself returns ``{"ok": true,
+    "status": "paid", "settled_via": <str>}`` and no payment link. Returns a
+    ``SettledPurchase`` only when the payload explicitly says so; ``None``
+    otherwise (the normal pay-a-link path)."""
+    payload = _payload_from_result(result)
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        return None
+    settled_via = payload.get("settled_via")
+    if not isinstance(settled_via, str) or not settled_via:
+        return None
+    if payload.get("status") != "paid":
+        return None
+    amount_inr = payload.get("amount")
+    if not isinstance(amount_inr, int) or isinstance(amount_inr, bool):
+        amount_inr = None
+    return SettledPurchase(total_inr=total_inr, settled_via=settled_via, amount_inr=amount_inr)
+
+
 def _rejection_from_result(result: Any) -> tuple[str | None, str | None] | None:
     """Some shops (Mercator's real contract, CLAUDE.md section 3.1) return a
     business-logic rejection as ``{"ok": false, "reason": ..., "detail":
@@ -105,7 +138,7 @@ def _describe_rejection(reason: str | None, detail: str | None) -> str:
     return text
 
 
-async def purchase(session: Any, validated: ValidationResult) -> PendingPurchase:
+async def purchase(session: Any, validated: ValidationResult) -> PendingPurchase | SettledPurchase:
     if not validated.ok:
         raise PurchaseError(f"cannot purchase: validation failed ({validated.reason})")
 
@@ -169,6 +202,10 @@ async def purchase(session: Any, validated: ValidationResult) -> PendingPurchase
             f"checkout blocked (idempotency_key={idempotency_key}): "
             f"{_describe_rejection(*rejection)}"
         )
+
+    settled = _settled_from_result(checkout_result, validated.total_inr)
+    if settled is not None:
+        return settled
 
     link = _payment_link_from_result(checkout_result)
     if link is None:

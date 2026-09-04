@@ -13,7 +13,7 @@ from emptor.config import Config, ConfigError, LLMSettings, load_config
 from emptor.decide import DecideError, decide
 from emptor.discover import DiscoverError, discover_catalog
 from emptor.filters import pre_filter
-from emptor.purchase import PendingPurchase, PurchaseError, purchase
+from emptor.purchase import PendingPurchase, PurchaseError, SettledPurchase, purchase
 from emptor.validate import ValidationResult, validate_picks
 
 _ACTOR = "emptor"
@@ -63,6 +63,24 @@ def _report_pending(pending: PendingPurchase) -> None:
     except Exception:
         try:
             print(f"PENDING: link id {_safe(pending.payment_link_id)}")
+        except Exception:
+            pass
+
+
+def _report_settled(settled: SettledPurchase) -> None:
+    """Print the SETTLED line: the shop drew a pre-funded balance it holds
+    and the checkout is already paid -- no link to pay, money has moved.
+    Same rule as _report_pending: once purchase() returned this is not a
+    failure, no formatting problem here may turn it into a BLOCKED.
+    ``settled_via`` is shop-supplied text -- sanitized before printing."""
+    try:
+        print(
+            f"SETTLED: bought for INR {settled.total_inr} via {_safe(settled.settled_via)} "
+            f"-- no payment link to pay, the shop settled it"
+        )
+    except Exception:
+        try:
+            print(f"SETTLED: paid INR {settled.total_inr}")
         except Exception:
             pass
 
@@ -150,7 +168,7 @@ async def run(
     assume_yes: bool = False,
     picks_override: str | None = None,
 ) -> int:
-    purchased_pending_link: PendingPurchase | None = None
+    purchased: PendingPurchase | SettledPurchase | None = None
     try:
         _safe_log_event(
             {"goal": goal, "budget_inr": budget_inr, "mercator_endpoint": config.mercator_endpoint},
@@ -261,13 +279,26 @@ async def run(
                 print(f"BLOCKED: purchase failed: {_safe(exc)}", file=sys.stderr)
                 return 1
 
-            # The checkout request went through. No money has moved yet --
-            # the buyer still has to pay the link -- but this is not a
-            # failure, and never a BLOCKED past this point (a retry would
-            # mint a fresh idempotency key and risk a second purchase once
-            # they do pay). Mercator's reconciler logs the real final
+            # The checkout request went through. Never a BLOCKED past this
+            # point (a retry would mint a fresh idempotency key and risk a
+            # second purchase).
+            purchased = pending
+            if isinstance(pending, SettledPurchase):
+                # The shop settled it from a balance it holds -- money HAS
+                # moved, there is no link to pay.
+                _safe_log_event(
+                    {
+                        "total_inr": pending.total_inr,
+                        "status": "paid",
+                        "settled_via": pending.settled_via,
+                    },
+                    event_type="checkout_result",
+                )
+                _report_settled(pending)
+                return 0
+            # PendingPurchase: no money has moved yet -- the buyer still has
+            # to pay the link; Mercator's reconciler logs the real final
             # outcome later, from its own process.
-            purchased_pending_link = pending
             _safe_log_event(
                 {
                     "payment_link_id": pending.payment_link_id,
@@ -279,11 +310,14 @@ async def run(
             _report_pending(pending)
             return 0
     except Exception as exc:
-        if purchased_pending_link is not None:
+        if purchased is not None:
             # The checkout already went through; never report BLOCKED. The
             # return 0 must not depend on this print succeeding.
             try:
-                print(f"PENDING: link id {_safe(purchased_pending_link.payment_link_id)}")
+                if isinstance(purchased, SettledPurchase):
+                    print(f"SETTLED: paid INR {purchased.total_inr}")
+                else:
+                    print(f"PENDING: link id {_safe(purchased.payment_link_id)}")
             except Exception:
                 pass
             return 0
