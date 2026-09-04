@@ -154,6 +154,26 @@ def test_blocked_run_when_validation_fails():
     assert "exceeds budget" in facts.blocked_reason
 
 
+def test_blocked_reason_prefers_the_detailed_message_with_real_numbers():
+    # Found live 2026-09-04: a bare reason code ("SPEND_CAP_EXCEEDED") gives
+    # the narration model no real figures to work with, and it fabricated
+    # one (borrowed the unrelated budget_inr and called it "the spending
+    # limit"). Mercator's checkout_result.detail already carries the exact
+    # cart total and cap - prefer it.
+    events = [
+        _ev("emptor", "goal_received", {"goal": "a fantasy novel", "budget_inr": 3000}, seq=1),
+        _ev("emptor", "validation_result",
+            {"ok": True, "items": [{"product_id": "prod_004", "quantity": 1, "line_total_inr": 2400}],
+             "total_inr": 2400}, seq=2),
+        _ev("mercator", "checkout_result",
+            {"idempotency_key": "k1", "ok": False, "reason": "SPEND_CAP_EXCEEDED",
+             "detail": "Cart total 2400 exceeds cap 1500", "status": None, "payment_link_id": None}, seq=30),
+    ]
+    facts = story.extract_run_facts(events, names={})
+    assert facts.outcome == "blocked"
+    assert facts.blocked_reason == "Cart total 2400 exceeds cap 1500"
+
+
 def test_unfinished_run_returns_none():
     events = [
         _ev("emptor", "goal_received", {"goal": "a book", "budget_inr": 800}, seq=1),
