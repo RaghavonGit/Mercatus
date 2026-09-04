@@ -54,7 +54,7 @@
     "stock": 10
   },
   {
-    "id": "prod_007",
+    "id": "prod_bread",
     "name": "Whole Wheat Bread",
     "price_inr": 45,
     "in_stock": true,
@@ -63,7 +63,7 @@
     "stock": 20
   },
   {
-    "id": "prod_008",
+    "id": "prod_chicken",
     "name": "Chicken Breast Fillets",
     "price_inr": 280,
     "in_stock": true,
@@ -72,7 +72,7 @@
     "stock": 15
   },
   {
-    "id": "prod_009",
+    "id": "prod_lettuce",
     "name": "Iceberg Lettuce",
     "price_inr": 40,
     "in_stock": true,
@@ -81,7 +81,7 @@
     "stock": 18
   },
   {
-    "id": "prod_010",
+    "id": "prod_tomato",
     "name": "Tomato",
     "price_inr": 35,
     "in_stock": true,
@@ -90,7 +90,7 @@
     "stock": 25
   },
   {
-    "id": "prod_011",
+    "id": "prod_mayo",
     "name": "Mayonnaise",
     "price_inr": 180,
     "in_stock": true,
@@ -99,7 +99,7 @@
     "stock": 14
   },
   {
-    "id": "prod_012",
+    "id": "prod_cheese",
     "name": "Cheddar Cheese Slices",
     "price_inr": 120,
     "in_stock": true,
@@ -108,7 +108,7 @@
     "stock": 16
   },
   {
-    "id": "prod_013",
+    "id": "prod_mustard",
     "name": "Yellow Mustard Sauce",
     "price_inr": 95,
     "in_stock": true,
@@ -117,7 +117,7 @@
     "stock": 12
   },
   {
-    "id": "prod_014",
+    "id": "prod_butter",
     "name": "Salted Butter",
     "price_inr": 60,
     "in_stock": true,
@@ -126,7 +126,7 @@
     "stock": 22
   },
   {
-    "id": "prod_015",
+    "id": "prod_onion",
     "name": "Onion",
     "price_inr": 30,
     "in_stock": true,
@@ -135,7 +135,7 @@
     "stock": 30
   },
   {
-    "id": "prod_016",
+    "id": "prod_pickles",
     "name": "Dill Pickles",
     "price_inr": 150,
     "in_stock": false,

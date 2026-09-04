@@ -229,12 +229,22 @@ Open <http://127.0.0.1:8100>.
    **Shop**. The model picks *Fountain Pen ₹1200* → over the ₹800 threshold →
    the normal **PENDING** payment card appears. The `autopay_result` row shows
    `"outcome":"fell_back_to_manual"`, `"fallback_cause":"AUTOPAY_OVER_THRESHOLD"`.
-3. **Fallback path (multi-item):** goal `the things needed for a chicken
-   sandwich`, budget `1500`, **Shop**. The model picks several `groceries`
-   items — bread, chicken, lettuce, mayo, cheese, … — each individually
-   under the autopay threshold, but a **PENDING** payment card appears
-   anyway: `"fallback_cause":"AUTOPAY_MULTI_ITEM"`. Autopay is single-item
-   only, regardless of price or category.
+3. **Fallback path (multi-item):** goal `buy the ingredients I need to make
+   a chicken sandwich`, budget `1500`, **Shop**. When the model recognises
+   several `groceries` items as relevant (bread, chicken, lettuce, mayo,
+   cheese, …) a **PENDING** payment card appears anyway, even though each
+   item is individually under the autopay threshold:
+   `"fallback_cause":"AUTOPAY_MULTI_ITEM"`. Autopay is single-item only,
+   regardless of price or category. **Known unreliable** (live-tested
+   2026-09-04): `qwen2.5:7b-instruct` sometimes decides none of the
+   groceries are relevant to a named dish and returns an empty pick list
+   instead — a genuine model-reasoning limitation on this exact GPU/Ollama
+   setup, not a bug in Mercator or Emptor (guardrails/autopay logic is
+   unaffected either way; Emptor just reports "empty pick list"). It is
+   more reliable at a single named item ("a loaf of bread") than at
+   inferring a dish's ingredient list. For a guaranteed multi-item
+   demonstration, use Path B's `--picks` below instead of relying on the
+   live model.
 
 ### Path B — Emptor CLI
 
@@ -258,6 +268,18 @@ Fallback:
 ```bash
 uv run emptor "a nice fountain pen" --budget 1500 --yes
 # -> PENDING: pay INR 1200 at https://rzp.io/... (link id plink_..., expires in ~6h)
+```
+
+Fallback, guaranteed multi-item (bypasses the LLM's pick, not its judgment —
+Emptor still validates each item for real; use this if you need the
+chicken-sandwich beat of a demo to land every time):
+
+```bash
+uv run emptor "chicken sandwich fixings" --budget 1500 --yes --picks \
+  '[{"product_id":"prod_bread","quantity":1},{"product_id":"prod_chicken","quantity":1},
+    {"product_id":"prod_lettuce","quantity":1},{"product_id":"prod_tomato","quantity":1},
+    {"product_id":"prod_mayo","quantity":1},{"product_id":"prod_cheese","quantity":1}]'
+# -> PENDING: pay INR ... (fallback_cause AUTOPAY_MULTI_ITEM in the ledger)
 ```
 
 Skip the LLM:

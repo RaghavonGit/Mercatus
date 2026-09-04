@@ -33,8 +33,8 @@ def test_load_catalog_returns_all_valid_products():
     ids = {p["id"] for p in products}
     assert ids == {
         "prod_001", "prod_002", "prod_003", "prod_004", "prod_005", "prod_006",
-        "prod_007", "prod_008", "prod_009", "prod_010", "prod_011", "prod_012",
-        "prod_013", "prod_014", "prod_015", "prod_016",
+        "prod_bread", "prod_chicken", "prod_lettuce", "prod_tomato", "prod_mayo",
+        "prod_cheese", "prod_mustard", "prod_butter", "prod_onion", "prod_pickles",
     }
 
 
