@@ -2,8 +2,6 @@
 LLM reasoning through. Emptor's building blocks are stubbed - no real shop,
 no real LLM."""
 
-import pytest
-
 from emptor.config import LLMSettings
 from emptor.decide import DecideError, DecideResult
 from emptor.purchase import PendingPurchase, PurchaseError

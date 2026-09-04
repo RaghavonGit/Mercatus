@@ -1,7 +1,5 @@
 from pathlib import Path
 
-import pytest
-
 from mercator.catalog import (
     MAX_CATEGORY_LENGTH,
     MAX_DESCRIPTION_LENGTH,

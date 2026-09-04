@@ -7,7 +7,7 @@ from fides import FidesError
 
 import emptor.run as run_module
 from emptor.config import Config, ConfigError, LLMSettings
-from emptor.decide import DecideError, DecideResult
+from emptor.decide import DecideResult
 from emptor.discover import DiscoverError
 from emptor.purchase import PendingPurchase, PurchaseError
 from emptor.run import _safe_log_event
