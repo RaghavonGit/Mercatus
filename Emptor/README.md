@@ -78,14 +78,17 @@ Then prints one of:
   — the checkout went through, but no money has moved yet: a human opens
   that link and pays it. The shop's reconciler records the real final
   outcome afterwards (Emptor has already exited). Exit code 0.
+- `SETTLED: bought for INR <total> via <method> -- no payment link to pay,
+  the shop settled it` — the shop settled the checkout itself from a balance
+  it holds (e.g. Mercator's autopay envelope). Money **has** moved; there is
+  nothing to pay. Exit code 0. Emptor does not authorize this — the shop
+  decides it deterministically server-side.
 - `DECLINED: purchase not confirmed by operator` (stderr) — you didn't type
   `yes`. Not a failure; exit code 0.
 - `BLOCKED: <reason>` (stderr, non-zero exit) — Emptor never guesses or
   silently retries a purchase on ambiguity. A common one:
   `BLOCKED: LLM endpoint ... is not reachable ... 'ollama serve'` — the
   preflight check runs before anything else.
-- `SUCCESS: …` is retained for a hypothetical future synchronous-payment
-  shop; the Payment Link flow above never prints it.
 
 ### `--picks`: skip the LLM
 
