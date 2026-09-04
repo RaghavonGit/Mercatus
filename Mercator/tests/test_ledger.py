@@ -113,6 +113,7 @@ def test_log_autopay_result_settled_marks_no_human_approval(tmp_path):
     assert entry.data["idempotency_key"] == "idem-key-1"
     assert entry.data["outcome"] == "autopay_settled"
     assert entry.data["human_approval"] is False
+    assert entry.data["replay"] is False
     assert entry.data["amount_inr"] == 300
     assert entry.data["balance_before_inr"] == 5000
     assert entry.data["balance_after_inr"] == 4700

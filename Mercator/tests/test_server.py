@@ -445,6 +445,7 @@ async def test_autopay_settles_sub_threshold_purchase_with_no_gateway_call(tmp_p
     client = make_fake_razorpay_client()
     server = make_server(tmp_path, razorpay_client=client, config=AUTOPAY_CONFIG)
     server._spend_tracker.credit_balance(5000)
+    stock_before = server_stock(server, "prod_001")
 
     cart_id, body = await _autopay_checkout(server)  # prod_001, books, 450 < 800
 
@@ -455,6 +456,8 @@ async def test_autopay_settles_sub_threshold_purchase_with_no_gateway_call(tmp_p
     assert client.payment_link.create.call_count == 0
     assert server._spend_tracker.autopay_balance() == 4550
     assert cart_id not in server._pending_links
+    # inventory stays consumed -- the sale really happened
+    assert server_stock(server, "prod_001") == stock_before - 1
 
     entry = autopay_result_entry(server_module_ledger(server))
     assert entry["outcome"] == "autopay_settled"
@@ -542,6 +545,31 @@ async def test_autopay_same_idempotency_key_debits_once(tmp_path):
 
     assert first.structured_content == second.structured_content
     assert server._spend_tracker.autopay_balance() == 4550
+
+
+@pytest.mark.asyncio
+async def test_autopay_replayed_debit_settles_without_moving_money(tmp_path):
+    # Simulates a crash after the durable debit committed but before the
+    # in-memory idempotency result was stored: the debit row for this key
+    # already exists, the checkout runs again.
+    client = make_fake_razorpay_client()
+    server = make_server(tmp_path, razorpay_client=client, config=AUTOPAY_CONFIG)
+    server._spend_tracker.credit_balance(5000)
+    server._spend_tracker.try_autopay_debit("idem-1", 450)  # prior committed debit
+    assert server._spend_tracker.autopay_balance() == 4550
+
+    _, body = await _autopay_checkout(server, key="idem-1")
+
+    assert body["ok"] is True
+    assert body["settled_via"] == "autopay"
+    assert server._spend_tracker.autopay_balance() == 4550  # no second debit
+    assert client.payment_link.create.call_count == 0
+
+    entry = autopay_result_entry(server_module_ledger(server))
+    assert entry["outcome"] == "autopay_settled"
+    assert entry["replay"] is True
+    assert entry["balance_before_inr"] is None
+    assert entry["balance_after_inr"] is None
 
 
 @pytest.mark.asyncio

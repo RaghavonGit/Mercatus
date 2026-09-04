@@ -74,13 +74,20 @@ class Ledger:
         balance_before_inr: int | None = None,
         balance_after_inr: int | None = None,
         fallback_cause: str | None = None,
+        replay: bool = False,
     ) -> fides.LedgerEntry:
         """The autopay decision, always logged whether autopay was taken or
         not. ``human_approval`` is always ``False`` -- at the moment of this
         event no human has approved anything; ``outcome`` says whether money
         moved autonomously (``autopay_settled``) or a human-paid link was
         issued instead (``fell_back_to_manual``). ``which rule permitted it``
-        is captured by snapshotting the threshold + allowlist in force."""
+        is captured by snapshotting the threshold + allowlist in force.
+
+        ``replay=True`` (with ``balance_*`` left ``None``) marks a settled
+        outcome where this call moved no money -- the debit for this
+        idempotency key had already committed on an earlier run -- so a
+        reader never mistakes ``balance_before == balance_after`` for a
+        zero-value autonomous charge."""
         return self.log(
             "autopay_result",
             {
@@ -88,6 +95,7 @@ class Ledger:
                 "idempotency_key": idempotency_key,
                 "outcome": outcome,
                 "human_approval": False,
+                "replay": replay,
                 "amount_inr": amount_inr,
                 "balance_before_inr": balance_before_inr,
                 "balance_after_inr": balance_after_inr,
