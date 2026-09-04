@@ -69,6 +69,76 @@ def test_log_checkout_result_rejection(tmp_path):
     assert entry.data["reason"] == "SPEND_CAP_EXCEEDED"
 
 
+def test_log_checkout_result_persists_status_link_and_amount(tmp_path):
+    # Was live-mode blocker (a): these fields were dropped, so paid vs
+    # cancelled vs expired vs failed were indistinguishable in the ledger.
+    ledger = Ledger(tmp_path / "ledger.db")
+    entry = ledger.log_checkout_result(
+        "cart_1",
+        "idem-key-1",
+        {
+            "ok": True,
+            "payment_link_id": "plink_9",
+            "amount": 450,
+            "status": "paid",
+        },
+    )
+    assert entry.data["status"] == "paid"
+    assert entry.data["payment_link_id"] == "plink_9"
+    assert entry.data["amount"] == 450
+
+
+def test_log_checkout_result_persists_detail_on_failure(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.db")
+    entry = ledger.log_checkout_result(
+        "cart_1", "idem-key-1", {"ok": False, "reason": "PAYMENT_FAILED", "detail": "create raised Timeout"}
+    )
+    assert entry.data["detail"] == "create raised Timeout"
+
+
+def test_log_autopay_result_settled_marks_no_human_approval(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.db")
+    entry = ledger.log_autopay_result(
+        "cart_1",
+        "idem-key-1",
+        outcome="autopay_settled",
+        amount_inr=300,
+        autopay_threshold_inr=800,
+        autopay_allowed_categories=["books"],
+        balance_before_inr=5000,
+        balance_after_inr=4700,
+    )
+    assert entry.event_type == "autopay_result"
+    assert entry.data["cart_id"] == "cart_1"
+    assert entry.data["idempotency_key"] == "idem-key-1"
+    assert entry.data["outcome"] == "autopay_settled"
+    assert entry.data["human_approval"] is False
+    assert entry.data["amount_inr"] == 300
+    assert entry.data["balance_before_inr"] == 5000
+    assert entry.data["balance_after_inr"] == 4700
+    assert entry.data["autopay_threshold_inr"] == 800
+    assert entry.data["autopay_allowed_categories"] == ["books"]
+    assert entry.data["fallback_cause"] is None
+    assert ledger.verify_chain().is_valid is True
+
+
+def test_log_autopay_result_fallback_records_cause(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.db")
+    entry = ledger.log_autopay_result(
+        "cart_1",
+        "idem-key-1",
+        outcome="fell_back_to_manual",
+        amount_inr=1200,
+        autopay_threshold_inr=800,
+        autopay_allowed_categories=["books"],
+        fallback_cause="AUTOPAY_OVER_THRESHOLD",
+    )
+    assert entry.data["outcome"] == "fell_back_to_manual"
+    assert entry.data["human_approval"] is False
+    assert entry.data["fallback_cause"] == "AUTOPAY_OVER_THRESHOLD"
+    assert entry.data["balance_before_inr"] is None
+
+
 def test_ledger_log_fn_records_all_six_guardrail_checks(tmp_path):
     ledger = Ledger(tmp_path / "ledger.db")
     cart = {"cart_id": "cart_1", "items": []}
