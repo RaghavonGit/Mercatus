@@ -145,9 +145,28 @@ every action is logged and independently verifiable.
 
 ---
 
-## Try it — the dashboard
+## Try it — one command
 
-For a watchable run, or for anyone who isn't going to open a terminal:
+```bash
+./demo.sh          # macOS / Linux        (Windows: demo.bat)
+```
+
+Sets up the `.env` files, funds the autopay envelope, starts Mercator, opens
+the dashboard at `http://127.0.0.1:8100`. Leave the prefilled goal, click
+**Shop**, and watch the shop **settle the purchase itself via autopay** — no
+payment link, no human click — with the ledger recording `human_approval: false`.
+`Ctrl+C` stops everything. Placeholder Razorpay keys work for this; real
+test-mode keys only matter for the payment-link fallback.
+
+Headless "does it actually work" check (no browser, Ollama, or keys):
+
+```bash
+./demo.sh --verify
+```
+
+Full autopay guide: **[Mercator/AUTOPAY.md](Mercator/AUTOPAY.md)**.
+
+### Just the dashboard
 
 ```bash
 cd Forum && uv run forum          # -> http://127.0.0.1:8100

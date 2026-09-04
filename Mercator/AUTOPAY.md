@@ -59,7 +59,55 @@ The `MAX_PENDING_PAYMENT_LINKS` race (2026-09-04) is untouched, still open.
 
 ---
 
-## 2. Configure
+## 2. Quick start — one command
+
+From the repo root:
+
+```bash
+./demo.bat            # Windows
+./demo.sh             # macOS / Linux
+```
+
+(or `cd Forum && uv run demo`.) It writes the three `.env` files if they are
+missing, checks Ollama, tops up the autopay envelope (no payment needed),
+starts Mercator, serves the dashboard, and opens your browser at
+`http://127.0.0.1:8100`. **Leave the prefilled goal and budget, click "Shop"** —
+the shop settles the purchase itself via autopay, no payment link, and the
+ledger records `human_approval: false`. `Ctrl+C` stops everything.
+
+Placeholder Razorpay keys are fine — the autopay path makes no gateway calls.
+Real Razorpay **test** keys in `Mercator/.env` are only needed for the
+payment-link *fallback* path (an over-threshold purchase).
+
+### Just show me it works (no browser, no Ollama, no keys)
+
+```bash
+./demo.sh --verify        # or: cd Forum && uv run demo --verify
+```
+
+Runs the whole autopay flow in-process and prints a checklist:
+
+```
+  PASS  config: threshold below the spend cap, autopay list a subset of the allowlist
+  PASS  config: a threshold above the spend cap is refused at startup
+  PASS  a 450 rupee books purchase settles via autopay (status: paid, no link)
+  PASS  the autopay settle made zero payment-gateway calls
+  PASS  the envelope balance went 1000 -> 550
+  PASS  the ledger records the autonomous charge with human_approval: false
+  PASS  replaying the same idempotency key does not debit a second time
+  PASS  a 1200 rupee purchase falls back to a payment link (over the threshold)
+  PASS  10 concurrent purchases on a 1000 balance: exactly 3 settle, balance never negative
+  PASS  the Fides hash chain is intact
+
+  PASS  (10/10)
+```
+
+Everything below is the **manual** path — only needed to run pieces
+separately or to change the setup the launcher makes.
+
+---
+
+## 3. Configure (manual)
 
 Add to **`Mercator/.env`** (gitignored — never commit real keys):
 
@@ -83,13 +131,13 @@ exactly as before.
 
 ---
 
-## 3. Run the test suites (no services needed)
+## 4. Run the full test suites (no services needed)
 
 ```bash
 cd Mercator && uv run pytest -q      # 437 passed
 cd ../Emptor  && uv run pytest -q    # 134 passed, 2 deselected
 cd ../Fides   && uv run pytest -q    # 62 passed
-cd ../Forum   && uv run pytest -q    # 15 passed
+cd ../Forum   && uv run pytest -q    # 16 passed  (includes the demo --verify checklist)
 ```
 
 Autopay-specific selections:
@@ -103,7 +151,10 @@ uv run pytest -q tests/test_topup.py                     # the mercator-topup co
 
 ---
 
-## 4. Fund the envelope
+## 5. Fund the envelope (manual)
+
+> The one-command launcher does this for you. This section is for funding it
+> by hand, or with a real hosted payment.
 
 **Do this before starting the Mercator server** — server startup cancels every
 open payment link on the account, which would kill an unpaid top-up link.
@@ -142,7 +193,10 @@ t=S('spend_tracker.db'); print('balance', t.autopay_balance(), '| sum_since(24)'
 
 ---
 
-## 5. Test it — pick one path
+## 6. Test it manually — pick one path
+
+> The one-command launcher (§2) is Path A with the setup automated. These are
+> for running the pieces separately.
 
 ### Path A — Forum dashboard (visual, end to end)
 
@@ -242,7 +296,7 @@ and `is_valid=True`.
 
 ---
 
-## 6. Inspect the ledger
+## 7. Inspect the ledger
 
 ```bash
 cd Mercator
@@ -263,7 +317,7 @@ Every autonomous charge is the pair
 
 ---
 
-## 7. Reset to a clean state
+## 8. Reset to a clean state
 
 ```bash
 # stop the Mercator server first
@@ -277,7 +331,7 @@ autopay-eligible purchase silently falls back to a payment link.
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|

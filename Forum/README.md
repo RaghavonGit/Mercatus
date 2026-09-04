@@ -35,6 +35,21 @@ pipeline steps and reads the other packages' state.
 
 ## Run
 
+**One command** (from the repo root) — writes the `.env` files if missing,
+funds the autopay envelope, starts Mercator, and opens the browser:
+
+```bash
+./demo.sh          # macOS / Linux      (Windows: demo.bat)
+```
+
+Headless "does it work?" checklist, no browser / Ollama / keys needed:
+
+```bash
+./demo.sh --verify
+```
+
+**Or start just the dashboard** (assumes the prerequisites above are set up):
+
 ```bash
 cd Forum
 uv run forum

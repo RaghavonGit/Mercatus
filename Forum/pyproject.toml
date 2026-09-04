@@ -22,6 +22,7 @@ dev = [
 
 [project.scripts]
 forum = "forum.app:main"
+demo = "forum.demo:main"
 
 [build-system]
 requires = ["hatchling"]
