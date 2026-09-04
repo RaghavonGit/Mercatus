@@ -14,12 +14,11 @@ sanitization, cart, config, payments, the durable spend tracker, ledger,
 and the MCP server itself (three tools: `list_products`, `add_to_cart`,
 `checkout`) plus the in-process payment-link reconciler. 437 tests passing.
 
-- **Real-money path (Payment Links)**: `checkout` now creates a Razorpay
-  **Payment Link** the buyer pays themselves in a browser — no
-  pre-authorized autopay. A background poller reconciles the outcome. The
-  full mocked test matrix passes; a live test-mode verification pass (a
-  real link, paid by hand) is the next step before `RAZORPAY_MODE=live` is
-  ever set.
+- **Real-money path (Payment Links)**: `checkout` creates a Razorpay
+  **Payment Link** the buyer pays themselves in a browser when autopay
+  doesn't apply (see below). A background poller reconciles the outcome.
+  Live test-mode verified: a real link, paid by hand, flips to `paid` on
+  its own.
 - **Legacy orders**: `payments.create_order` and its live test-mode
   verification (order creation, amount echoing, replayed-key idempotency,
   all confirmed against the real Razorpay test API) remain in the codebase
@@ -46,9 +45,17 @@ and the MCP server itself (three tools: `list_products`, `add_to_cart`,
 Full history and reasoning for all of the above lives in `CLAUDE.md`
 section 15 (decision log) and section 16 (build status table).
 
-**Multi-item carts** are now supported: `add_to_cart` takes an optional
-`cart_id` and merges repeat products into one line; `checkout` closes out
-the whole cart in one Payment Link.
+**Multi-item carts** are now supported for the Payment Link path:
+`add_to_cart` takes an optional `cart_id` and merges repeat products into
+one line; `checkout` closes out the whole cart in one Payment Link. Autopay
+itself stays single-item only (see `## Autopay`) — a multi-item cart is
+disqualified from auto-approval before price or category are even checked.
+
+**`RAZORPAY_MODE=live` is deliberately gated** — everything above is
+live-verified in test mode, but real money stays off until an independent
+review of the merchant server's concurrency handling (lock ordering around
+`checkout`, the reconciler's snapshot-pop-act sequencing) is done. Test
+mode has no such restriction; that's what this whole demo runs in.
 
 ## Setup
 
