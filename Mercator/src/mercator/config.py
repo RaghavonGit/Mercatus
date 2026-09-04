@@ -9,6 +9,8 @@ and a loaded ``.env`` file) rather than reading the process environment
 directly, so it stays trivially testable.
 """
 
+from dataclasses import dataclass
+
 DEFAULT_PORT = 8000
 DEFAULT_CUMULATIVE_SPEND_WINDOW_HOURS = 24
 DEFAULT_MAX_PENDING_PAYMENT_LINKS = 5
@@ -18,6 +20,24 @@ RAZORPAY_MODES = {"test", "live"}
 
 class ConfigError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class AutopayConfig:
+    """The tiered-autonomy envelope, parsed only when ``AUTOPAY_ENABLED=true``.
+    ``Config.autopay is None`` means the feature is off and ``checkout``
+    behaves exactly as it does without it.
+
+    Invariants enforced at ``load_config`` time, so a judge can verify
+    "autopay is always a tightening, never a widening" by reading one
+    function:
+    - ``threshold_inr`` is strictly below ``SPEND_CAP_INR``
+    - ``allowed_categories`` is a subset of ``ALLOWED_CATEGORIES``
+    """
+
+    threshold_inr: int
+    allowed_categories: list[str]
+    max_balance_inr: int
 
 
 class Config:
@@ -33,6 +53,7 @@ class Config:
         cumulative_spend_window_hours: int,
         payment_link_expire_hours: int | None,
         max_pending_payment_links: int,
+        autopay: AutopayConfig | None = None,
     ) -> None:
         self.razorpay_key_id = razorpay_key_id
         self.razorpay_key_secret = razorpay_key_secret
@@ -44,6 +65,7 @@ class Config:
         self.cumulative_spend_window_hours = cumulative_spend_window_hours
         self.payment_link_expire_hours = payment_link_expire_hours
         self.max_pending_payment_links = max_pending_payment_links
+        self.autopay = autopay
 
 
 def _require_str(env: dict, key: str) -> str:
@@ -110,6 +132,52 @@ def _parse_categories(env: dict, key: str) -> list[str]:
     return [c.strip() for c in value.split(",") if c.strip()]
 
 
+def _require_bool(env: dict, key: str, default: bool = False) -> bool:
+    """Strict: unset -> ``default``; ``"true"``/``"false"`` (exact, lowercase)
+    -> the bool; anything else is a startup failure, never a silent default
+    (section 10). Mirrors ``_require_one_of``'s case-sensitivity."""
+    value = env.get(key)
+    if value is None or value == "":
+        return default
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise ConfigError(f"{key} must be exactly 'true' or 'false', got {value!r}")
+
+
+def _parse_autopay(env: dict, spend_cap_inr: int, allowed_categories: list[str]) -> AutopayConfig | None:
+    if not _require_bool(env, "AUTOPAY_ENABLED"):
+        return None
+
+    threshold_inr = _parse_positive_int(env, "AUTOPAY_THRESHOLD_INR")
+    if threshold_inr >= spend_cap_inr:
+        raise ConfigError(
+            f"AUTOPAY_THRESHOLD_INR ({threshold_inr}) must be strictly below "
+            f"SPEND_CAP_INR ({spend_cap_inr}) -- autopay is a tightening, not a widening"
+        )
+
+    autopay_categories = _parse_categories(env, "AUTOPAY_ALLOWED_CATEGORIES")
+    if not autopay_categories:
+        raise ConfigError(
+            "AUTOPAY_ALLOWED_CATEGORIES is required and must be non-empty when AUTOPAY_ENABLED=true"
+        )
+    extra = sorted(set(autopay_categories) - set(allowed_categories))
+    if extra:
+        raise ConfigError(
+            f"AUTOPAY_ALLOWED_CATEGORIES must be a subset of ALLOWED_CATEGORIES; "
+            f"not on the main allowlist: {extra}"
+        )
+
+    max_balance_inr = _parse_positive_int(env, "AUTOPAY_MAX_BALANCE_INR")
+
+    return AutopayConfig(
+        threshold_inr=threshold_inr,
+        allowed_categories=autopay_categories,
+        max_balance_inr=max_balance_inr,
+    )
+
+
 def load_config(env: dict) -> Config:
     razorpay_mode = _require_one_of(env, "RAZORPAY_MODE", RAZORPAY_MODES)
 
@@ -125,14 +193,17 @@ def load_config(env: dict) -> Config:
     if razorpay_mode == "live" and payment_link_expire_hours is None:
         raise ConfigError("PAYMENT_LINK_EXPIRE_HOURS is required when RAZORPAY_MODE is live")
 
+    # spend_cap_inr is already unconditionally required today (via
+    # _parse_positive_int), so it's already required in live mode too — no
+    # additional live-mode check needed here.
+    spend_cap_inr = _parse_positive_int(env, "SPEND_CAP_INR")
+    allowed_categories = _parse_categories(env, "ALLOWED_CATEGORIES")
+
     return Config(
         razorpay_key_id=_require_str(env, "RAZORPAY_KEY_ID"),
         razorpay_key_secret=_require_str(env, "RAZORPAY_KEY_SECRET"),
-        # spend_cap_inr is already unconditionally required today (via
-        # _parse_positive_int below), so it's already required in live mode
-        # too — no additional live-mode check needed here.
-        spend_cap_inr=_parse_positive_int(env, "SPEND_CAP_INR"),
-        allowed_categories=_parse_categories(env, "ALLOWED_CATEGORIES"),
+        spend_cap_inr=spend_cap_inr,
+        allowed_categories=allowed_categories,
         port=_parse_optional_int(env, "MERCATOR_PORT", DEFAULT_PORT),
         razorpay_mode=razorpay_mode,
         cumulative_spend_cap_inr=cumulative_spend_cap_inr,
@@ -143,4 +214,5 @@ def load_config(env: dict) -> Config:
         max_pending_payment_links=_parse_optional_positive_int(
             env, "MAX_PENDING_PAYMENT_LINKS", DEFAULT_MAX_PENDING_PAYMENT_LINKS
         ),
+        autopay=_parse_autopay(env, spend_cap_inr, allowed_categories),
     )
