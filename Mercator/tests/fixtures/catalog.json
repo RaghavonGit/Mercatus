@@ -52,5 +52,95 @@
     "category": "electronics",
     "description": "Portable speaker. Category is not on the default allowlist, for testing.",
     "stock": 10
+  },
+  {
+    "id": "prod_007",
+    "name": "Whole Wheat Bread",
+    "price_inr": 45,
+    "in_stock": true,
+    "category": "groceries",
+    "description": "400g sandwich loaf.",
+    "stock": 20
+  },
+  {
+    "id": "prod_008",
+    "name": "Chicken Breast Fillets",
+    "price_inr": 280,
+    "in_stock": true,
+    "category": "groceries",
+    "description": "500g, boneless, skinless.",
+    "stock": 15
+  },
+  {
+    "id": "prod_009",
+    "name": "Iceberg Lettuce",
+    "price_inr": 40,
+    "in_stock": true,
+    "category": "groceries",
+    "description": "One head, washed.",
+    "stock": 18
+  },
+  {
+    "id": "prod_010",
+    "name": "Tomato",
+    "price_inr": 35,
+    "in_stock": true,
+    "category": "groceries",
+    "description": "1kg, loose.",
+    "stock": 25
+  },
+  {
+    "id": "prod_011",
+    "name": "Mayonnaise",
+    "price_inr": 180,
+    "in_stock": true,
+    "category": "groceries",
+    "description": "250g jar.",
+    "stock": 14
+  },
+  {
+    "id": "prod_012",
+    "name": "Cheddar Cheese Slices",
+    "price_inr": 120,
+    "in_stock": true,
+    "category": "groceries",
+    "description": "Pack of 10 slices.",
+    "stock": 16
+  },
+  {
+    "id": "prod_013",
+    "name": "Yellow Mustard Sauce",
+    "price_inr": 95,
+    "in_stock": true,
+    "category": "groceries",
+    "description": "200g squeeze bottle.",
+    "stock": 12
+  },
+  {
+    "id": "prod_014",
+    "name": "Salted Butter",
+    "price_inr": 60,
+    "in_stock": true,
+    "category": "groceries",
+    "description": "100g block.",
+    "stock": 22
+  },
+  {
+    "id": "prod_015",
+    "name": "Onion",
+    "price_inr": 30,
+    "in_stock": true,
+    "category": "groceries",
+    "description": "1kg, loose.",
+    "stock": 30
+  },
+  {
+    "id": "prod_016",
+    "name": "Dill Pickles",
+    "price_inr": 150,
+    "in_stock": false,
+    "category": "groceries",
+    "description": "350g jar. Currently out of stock.",
+    "stock": 0
   }
 ]

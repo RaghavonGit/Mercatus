@@ -116,14 +116,19 @@ Add to **`Mercator/.env`** (gitignored — never commit real keys):
 #     SPEND_CAP_INR / ALLOWED_CATEGORIES / MERCATOR_PORT / MCP_TRANSPORT) ...
 
 AUTOPAY_ENABLED=true
-AUTOPAY_THRESHOLD_INR=800          # must be strictly < SPEND_CAP_INR
-AUTOPAY_ALLOWED_CATEGORIES=books   # must be a subset of ALLOWED_CATEGORIES
+AUTOPAY_THRESHOLD_INR=800                    # must be strictly < SPEND_CAP_INR
+AUTOPAY_ALLOWED_CATEGORIES=books,groceries   # must be a subset of ALLOWED_CATEGORIES
 AUTOPAY_MAX_BALANCE_INR=5000
 ```
 
-With the stock catalog (`tests/fixtures/catalog.json`): `prod_001` "The Hobbit"
-is ₹450 / `books` → **autopay-eligible**. Every other item is ≥ ₹899 or off the
-`books` list → **falls back to a link**.
+With the stock catalog (`tests/fixtures/catalog.json`, 16 products): a
+single `books` or `groceries` item at or under ₹800 — "The Hobbit" ₹450, or
+any one sandwich ingredient (bread, chicken, lettuce, …) — **settles via
+autopay**. Everything else falls back to a link: over ₹800 (Fountain Pen
+₹1200), off both allowlists (Bluetooth Speaker ₹3500), or **more than one
+line item** — "the things needed for a chicken sandwich" always falls back
+on `AUTOPAY_MULTI_ITEM`, however cheap each ingredient is, because
+multi-item is checked before threshold or category.
 
 `AUTOPAY_ENABLED` accepts only exact `true` / `false`; anything else (`yes`,
 `1`, `True`) is a startup failure. Leave it unset/`false` and Mercator behaves
@@ -220,10 +225,16 @@ Open <http://127.0.0.1:8100>.
    ticks up ₹450. The Fides panel shows an `autopay_result` row with
    `"human_approval":false`, `"outcome":"autopay_settled"`, and the
    `balance_before/after`. Both chain badges stay ✓.
-2. **Fallback path:** goal `a nice fountain pen`, budget `1500`, **Shop**.
-   The model picks *Fountain Pen ₹1200* → over the ₹800 threshold → the normal
-   **PENDING** payment card appears. The `autopay_result` row shows
+2. **Fallback path (over threshold):** goal `a nice fountain pen`, budget `1500`,
+   **Shop**. The model picks *Fountain Pen ₹1200* → over the ₹800 threshold →
+   the normal **PENDING** payment card appears. The `autopay_result` row shows
    `"outcome":"fell_back_to_manual"`, `"fallback_cause":"AUTOPAY_OVER_THRESHOLD"`.
+3. **Fallback path (multi-item):** goal `the things needed for a chicken
+   sandwich`, budget `1500`, **Shop**. The model picks several `groceries`
+   items — bread, chicken, lettuce, mayo, cheese, … — each individually
+   under the autopay threshold, but a **PENDING** payment card appears
+   anyway: `"fallback_cause":"AUTOPAY_MULTI_ITEM"`. Autopay is single-item
+   only, regardless of price or category.
 
 ### Path B — Emptor CLI
 
