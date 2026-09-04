@@ -118,6 +118,13 @@ uv run mercator-topup 1000        # mints a hosted link, waits for you to pay it
 uv run mercator-topup 1000 --skip-payment   # credit directly (assumes an out-of-band payment)
 ```
 
+**Fund the envelope *before* starting `uv run mercator`** — server startup
+cancels every open payment link on the account, which would kill an unpaid
+top-up link out from under the polling CLI. Deleting `spend_tracker.db`
+(e.g. for a clean demo) zeroes the balance, so re-run `mercator-topup`
+after any such reset or every autopay purchase will just fall back to a
+Payment Link.
+
 The balance is bounded by `AUTOPAY_MAX_BALANCE_INR`; a top-up is money
 *in* and never counts toward `CUMULATIVE_SPEND_CAP_INR`, but an autopay
 *debit* does (it is money out the door exactly like a paid link).
