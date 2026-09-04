@@ -101,6 +101,8 @@ back to a test-mode default.
 
 ## Autopay
 
+**Full guide + step-by-step test instructions: [`AUTOPAY.md`](AUTOPAY.md).**
+
 A second, opt-in checkout path. When `AUTOPAY_ENABLED=true`, a `checkout`
 whose total is **≤ `AUTOPAY_THRESHOLD_INR`**, whose single line item's
 category is on **`AUTOPAY_ALLOWED_CATEGORIES`**, is settled by decrementing
