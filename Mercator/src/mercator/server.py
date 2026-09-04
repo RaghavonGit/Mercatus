@@ -394,6 +394,7 @@ def build_server(
                     "settled_via": "autopay",
                 }
                 cart_store.complete_checkout(cart_id)
+                replayed = autopay_settled.status == "replayed"
                 _safe_log_autopay_result(
                     ledger,
                     cart_id,
@@ -401,8 +402,9 @@ def build_server(
                     outcome="autopay_settled",
                     amount_inr=autopay_settled.amount_inr,
                     autopay=config.autopay,
-                    balance_before_inr=autopay_settled.balance_before_inr,
-                    balance_after_inr=autopay_settled.balance_after_inr,
+                    replay=replayed,
+                    balance_before_inr=None if replayed else autopay_settled.balance_before_inr,
+                    balance_after_inr=None if replayed else autopay_settled.balance_after_inr,
                 )
                 _safe_log_checkout_result(ledger, cart_id, idempotency_key, outcome)
                 return outcome
