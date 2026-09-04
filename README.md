@@ -83,8 +83,8 @@ in a ledger that shows if it was altered.**
 | Give the agent a saved card or an autopay mandate | `checkout` returns a **Payment Link a human pays**; no stored instrument, no standing mandate | The worst case is an unpaid link that expires — not a drained card |
 | Put the spending limit in the prompt | Caps enforced **server-side in deterministic Python**, fail-closed | A prompt can be injected or ignored; an `if amount > cap: reject` cannot |
 | Trust the shopper agent to police itself | Mercator treats **every client as hostile** and re-checks stock, caps, allowlist, idempotency on every call | Client-side checks are bypassable by construction; the seller must be the enforcer |
-| Have an LLM judge whether a purchase is OK | **Zero LLM calls** on the merchant side — the rules are code, with 338 tests | You can read, test, and trust every branch of the decision |
-| Reach for an agent framework (LangChain, CrewAI, AutoGPT) | Plain orchestration, **exactly one LLM call in the whole pipeline**, every other step a pure function | Less surface area, fully unit-testable, no framework lock-in or hidden calls |
+| Have an LLM judge whether a purchase is OK | **Zero LLM calls** on the merchant side — the rules are code, with 437 tests | You can read, test, and trust every branch of the decision |
+| Reach for an agent framework (LangChain, CrewAI, AutoGPT) | Plain orchestration, **exactly one LLM call in the buying pipeline**, every other step a pure function | Less surface area, fully unit-testable, no framework lock-in or hidden calls |
 | Write to a log file and call it an audit trail | **Fides hash chain** — editing any past entry breaks the chain at a provable point | "Trust me, the log says so" becomes "here is the math" |
 | One cloud model as a hard dependency | Decision LLM is a **local Ollama model** by default (`qwen2.5:7b-instruct`), provider-pluggable via env vars | No API key, no per-call cost, no disappearing preview models, runs offline |
 
@@ -101,7 +101,7 @@ everywhere a mistake costs money.**
 | **[Emptor](Emptor/)** | Autonomous shopper. Goal + budget in, connects to any MCP shop, decides what to buy, requests the purchase. Never decides whether it's *allowed*. | 1 (item selection only) | [Emptor/README.md](Emptor/README.md) |
 | **[Mercator](Mercator/)** | Merchant MCP server. Hosts the catalog, enforces every purchase rule server-side, mints the Payment Link, reconciles the outcome. | 0 | [Mercator/README.md](Mercator/README.md) |
 | **[Fides](Fides/)** | Tamper-evident ledger. SHA256 hash-linked chain; proves — not just claims — whether it was altered. Standard library only, zero runtime deps. | 0 | [Fides/README.md](Fides/README.md) |
-| **[Forum](Forum/)** | Local demo dashboard (FastAPI + one static page). Runs the whole flow from one screen: the pick and its reason, the validation checks, the payment link flipping PENDING→PAID, both hash chains, the spend gauge. **Presentation layer — not a security boundary.** | 0 | [Forum/README.md](Forum/README.md) |
+| **[Forum](Forum/)** | Local demo dashboard (FastAPI + one static page). Runs the whole flow from one screen: the pick and its reason, the validation checks, the payment link flipping PENDING→PAID, both hash chains, the spend gauge, and a plain-English recap of the run. **Presentation layer — not a security boundary.** | 1 (run recap only — reads the committed ledger, never in the money path) | [Forum/README.md](Forum/README.md) |
 
 Latin, for the curious: *emptor* (buyer), *mercator* (merchant), *fides*
 (good faith), *forum* (the marketplace).
@@ -110,8 +110,8 @@ Latin, for the curious: *emptor* (buyer), *mercator* (merchant), *fides*
 
 ## What's real today
 
-All four packages are independently built and tested — **542 tests** (338
-Mercator, 128 Emptor, 62 Fides, 14 Forum), plus 2 `@live` Emptor tests that
+All four packages are independently built and tested — **666 tests** (437
+Mercator, 134 Emptor, 62 Fides, 33 Forum), plus 2 `@live` Emptor tests that
 run against a real Ollama before a demo.
 
 The **real-money path** (Payment Links, cumulative spend cap, pending-link
@@ -155,8 +155,11 @@ Sets up the `.env` files, funds the autopay envelope, starts Mercator, opens
 the dashboard at `http://127.0.0.1:8100`. Leave the prefilled goal, click
 **Shop**, and watch the shop **settle the purchase itself via autopay** — no
 payment link, no human click — with the ledger recording `human_approval: false`.
-`Ctrl+C` stops everything. Placeholder Razorpay keys work for this; real
-test-mode keys only matter for the payment-link fallback.
+The ledger panel then shows a **plain-English recap** of the run — what was
+bought, for how much, how it settled, the transaction reference — written by
+the same local model from the committed ledger entries (the raw hash-chained
+events are one click away). `Ctrl+C` stops everything. Placeholder Razorpay
+keys work for this; real test-mode keys only matter for the payment-link fallback.
 
 Headless "does it actually work" check (no browser, Ollama, or keys):
 

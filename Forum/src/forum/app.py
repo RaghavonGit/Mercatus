@@ -11,6 +11,8 @@ Mercator. It is allowed to read the other packages' state directly.
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import json
 import os
 from contextlib import asynccontextmanager
@@ -25,7 +27,7 @@ from pydantic import BaseModel
 from forum.config import load_forum_config
 from forum.ledger_read import read_ledgers
 from forum.pipeline import run_pipeline
-from forum import system
+from forum import story, system
 
 _STATIC = Path(__file__).resolve().parent / "static"
 
@@ -125,6 +127,55 @@ def api_ledger(after_mercator: int = 0, after_emptor: int = 0) -> dict:
         after_mercator=after_mercator,
         after_emptor=after_emptor,
     )
+
+
+# A completed run's narration, keyed by the terminal ledger entry's hash so
+# a pending->paid flip re-narrates but a poll does not. Single local session,
+# one run at a time -> the cache holds at most one entry.
+_story_cache: dict[str, dict] = {}
+
+
+async def _catalog_names() -> dict[str, str]:
+    """product_id -> name, for the story's fact box. Best-effort: if the shop
+    is unreachable the story falls back to raw product ids."""
+    from emptor.client import ShopConnection
+    from emptor.discover import discover_catalog
+
+    try:
+        async with ShopConnection(CONFIG.mercator_endpoint) as session:
+            products = await discover_catalog(session)
+    except Exception:  # noqa: BLE001 - names are a nicety, never a hard dep
+        return {}
+    return {p["id"]: p.get("name") for p in products if isinstance(p.get("id"), str) and p.get("name")}
+
+
+@app.get("/api/story")
+async def api_story() -> dict:
+    # read_ledgers is sync SQLite + verify_chain() over both chains - keep it
+    # off the event loop (same reason /api/ledger is a plain `def`).
+    ledgers = await asyncio.to_thread(read_ledgers, CONFIG.mercator_ledger_db, CONFIG.emptor_ledger_db)
+    names = await _catalog_names()
+    facts = story.extract_run_facts(ledgers["events"], names=names)
+    if facts is None:
+        return {"ready": False}
+
+    key = facts.ledger_ref or "run"
+    if key not in _story_cache:
+        try:
+            prose = await story.narrate(facts, system.llm_settings())
+            narrated = True
+        except story.StoryError:
+            prose, narrated = None, False
+        _story_cache.clear()
+        _story_cache[key] = {"story": prose, "narrated": narrated}
+
+    entry = _story_cache[key]
+    return {
+        "ready": True,
+        "facts": dataclasses.asdict(facts),
+        "story": entry["story"],
+        "narrated": entry["narrated"],
+    }
 
 
 @app.get("/api/spend")

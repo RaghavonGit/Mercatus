@@ -199,12 +199,100 @@ function resetRun() {
   if (h) h.textContent = "Payment link created";
   state.paymentId = null;
   stopPaymentPolling();
+
+  $("#story").hidden = true;
+  $("#story-facts").innerHTML = "";
+  $("#story-prose").textContent = "";
+  showRaw(true);
 }
 
 function finishRun() {
   state.running = false;
   refreshHealth();
+  fetchStory();
 }
+
+/* ---------------- run story ---------------- */
+
+async function fetchStory(tries = 0, expectPaid = false) {
+  let data;
+  try { data = await (await fetch("/api/story")).json(); }
+  catch { return; }
+  if (!data.ready) {
+    if (tries < 4) setTimeout(() => fetchStory(tries + 1, expectPaid), 1200);
+    return;
+  }
+  renderStory(data);
+  // Forum polls Razorpay directly, ahead of Mercator's ~45s reconciler, so the
+  // ledger can still say "pending" for a link we already know is paid. Keep
+  // asking until the reconciler catches up (window outlives it).
+  if (expectPaid && data.facts && data.facts.outcome === "pending_link" && tries < 30) {
+    setTimeout(() => fetchStory(tries + 1, true), 2000);
+  }
+}
+
+function renderStory(data) {
+  const f = data.facts;
+  const dl = $("#story-facts");
+  dl.innerHTML = "";
+
+  const rows = [["Goal", f.goal]];
+  if (Array.isArray(f.items) && f.items.length) {
+    rows.push(["Bought", f.items.map((i) => `${i.quantity}× ${i.name}`).join(", ")]);
+  }
+  if (f.amount_inr != null) rows.push(["Amount", "INR " + f.amount_inr]);
+  rows.push(["How it settled", settleLabel(f)]);
+  const ref = f.payment_link_id || f.idempotency_key || f.ledger_ref;
+  if (ref) rows.push(["Transaction ref", ref]);
+  const when = f.settled_at || f.started_at;
+  if (when) rows.push(["When", fmtTime(when)]);
+  if (f.human_approval === false) rows.push(["Human approval", "none — the shop settled it on its own"]);
+  else if (f.human_approval === true) rows.push(["Human approval", "a person paid the payment link"]);
+
+  for (const [k, v] of rows) {
+    const dt = el("dt"); dt.textContent = k;
+    const dd = el("dd"); dd.textContent = v;
+    dl.append(dt, dd);
+  }
+
+  const prose = $("#story-prose");
+  if (data.narrated && data.story) {
+    prose.textContent = data.story;
+    prose.classList.remove("story-prose-missing");
+    showRaw(false);
+  } else {
+    prose.textContent =
+      "Plain-English summary unavailable — the local model isn't reachable. " +
+      "The facts above and the raw ledger entries below are the record.";
+    prose.classList.add("story-prose-missing");
+    showRaw(true);
+  }
+  $("#story").hidden = false;
+}
+
+function settleLabel(f) {
+  switch (f.outcome) {
+    case "settled": return `drawn from the shop's prepaid balance via ${f.settled_via || "autopay"} — no payment link, no gateway charge`;
+    case "paid": return "a payment link, paid by a human";
+    case "pending_link": return "a payment link — awaiting payment";
+    case "blocked": return "not settled — " + (f.blocked_reason || "the shop refused the purchase");
+    default: return String(f.outcome);
+  }
+}
+
+function fmtTime(iso) {
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? String(iso) : d.toLocaleString();
+}
+
+function showRaw(show) {
+  $("#events").hidden = !show;
+  const btn = $("#raw-toggle");
+  btn.textContent = show ? "Hide the raw ledger entries" : "Show the raw ledger entries";
+  btn.setAttribute("aria-expanded", String(show));
+}
+
+$("#raw-toggle").addEventListener("click", () => showRaw($("#events").hidden));
 
 /* ---------------- payment ---------------- */
 
@@ -254,6 +342,7 @@ async function pollPaymentOnce() {
     setBadge(status === "partially_paid" ? "cancelled" : status);
     stopPaymentPolling();
     refreshSpend();
+    if (status === "paid") fetchStory(0, true);
   } else {
     setBadge("pending");
   }

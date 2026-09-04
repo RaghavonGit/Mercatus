@@ -298,6 +298,27 @@ def _verify() -> int:
     server = build_server(catalog=copy.deepcopy(catalog), config=config,
                           razorpay_client=client, ledger=ledger, spend_tracker=tracker)
 
+    import json as _j
+
+    from forum import story as _story
+
+    def _story_events() -> list[dict]:
+        """The ledger rows so far, shaped like ledger_read.read_ledgers, with a
+        synthetic emptor goal_received in front (the emptor pipeline isn't run
+        here) so the dashboard's fact extractor has a run to anchor on."""
+        evs = [{
+            "seq": 0, "timestamp": "2026-09-04T09:59:59+00:00", "actor": "emptor",
+            "event_type": "goal_received",
+            "data": {"goal": "a fantasy novel for a teenager", "budget_inr": 800}, "entry_hash": "seed",
+        }]
+        for r in ledger._ledger._store.get_all_entries():
+            evs.append({
+                "seq": r["seq"], "timestamp": r["timestamp"], "actor": r["actor"],
+                "event_type": r["event_type"], "data": _j.loads(r["data"]),
+                "entry_hash": r["entry_hash"][:12],
+            })
+        return evs
+
     async def run_checks():
         add = await server.call_tool("add_to_cart", {"product_id": "prod_001", "quantity": 1})
         cid = add.structured_content["cart_id"]
@@ -309,9 +330,15 @@ def _verify() -> int:
         check(tracker.autopay_balance() == 550,
               "the envelope balance went 1000 -> 550")
 
-        rows = ledger._ledger._store.get_all_entries()
-        import json as _j
-        ap = next((_j.loads(r["data"]) for r in rows if r["event_type"] == "autopay_result"), None)
+        # the dashboard's plain-English run story, from the real ledger rows
+        # written so far (no LLM -- just the fact extractor)
+        rf = _story.extract_run_facts(_story_events(), names={"prod_001": "The Hobbit"})
+        check(rf is not None and rf.outcome == "settled"
+              and rf.human_approval is False and rf.amount_inr == 450,
+              "the dashboard's run story reads the ledger: The Hobbit, INR 450, no human approval")
+
+        ap = next((_j.loads(r["data"]) for r in ledger._ledger._store.get_all_entries()
+                   if r["event_type"] == "autopay_result"), None)
         check(ap is not None and ap.get("human_approval") is False and ap.get("outcome") == "autopay_settled",
               "the ledger records the autonomous charge with human_approval: false")
 
