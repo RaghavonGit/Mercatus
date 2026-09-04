@@ -119,12 +119,15 @@ def _safe_log_checkout_result(ledger: Ledger, cart_id: str, idempotency_key: str
         pass
 
 
-def _safe_log_autopay_result(ledger: Ledger, cart_id: str, idempotency_key: str, **fields) -> None:
+def _safe_log_autopay_result(
+    ledger: Ledger, cart_id: str, idempotency_key: str, autopay, **fields
+) -> None:
     # The autopay debit may have already committed by this point -- same
-    # rule as _safe_log_checkout_result: a broken ledger callback must never
-    # propagate past this call and defeat the idempotency guarantee for an
-    # already-completed autonomous purchase.
-    autopay = fields.pop("autopay")
+    # rule as _safe_log_checkout_result: nothing in here may propagate past
+    # this call and defeat the idempotency guarantee for an already-
+    # completed autonomous purchase. `autopay` is an explicit parameter (not
+    # a popped kwarg) so a bad call site can't raise KeyError before the
+    # try.
     try:
         ledger.log_autopay_result(
             cart_id,
