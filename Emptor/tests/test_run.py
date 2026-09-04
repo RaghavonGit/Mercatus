@@ -9,7 +9,7 @@ import emptor.run as run_module
 from emptor.config import Config, ConfigError, LLMSettings
 from emptor.decide import DecideResult
 from emptor.discover import DiscoverError
-from emptor.purchase import PendingPurchase, PurchaseError
+from emptor.purchase import PendingPurchase, PurchaseError, SettledPurchase
 from emptor.run import _safe_log_event
 
 # The autouse _no_real_llm_preflight fixture (conftest.py) replaces
@@ -29,6 +29,8 @@ PENDING = PendingPurchase(
     total_inr=100,
     expire_hours=6,
 )
+
+SETTLED = SettledPurchase(total_inr=100, settled_via="autopay", amount_inr=100)
 
 RUPEE = "₹"
 
@@ -78,6 +80,39 @@ async def test_run_pending_path(monkeypatch, capsys):
     assert "PENDING: pay INR 100 at https://rzp.io/i/plink-1" in out
     assert "link id plink-1" in out
     assert "expires in ~6h" in out
+
+
+async def test_run_settled_path_reports_settled_and_exits_zero(monkeypatch, capsys):
+    _wire_happy_path(monkeypatch, purchase_result=SETTLED)
+    events = []
+    monkeypatch.setattr(
+        run_module, "_safe_log_event", lambda data, *, event_type: events.append((event_type, data))
+    )
+
+    exit_code = await run_module.run("buy a widget", 1000, CONFIG, assume_yes=True)
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "SETTLED" in out
+    assert "autopay" in out
+    assert "100" in out
+    assert "PENDING" not in out
+
+    checkout = next(d for t, d in events if t == "checkout_result")
+    assert checkout["status"] == "paid"
+    assert checkout["settled_via"] == "autopay"
+
+
+async def test_run_settled_still_exits_zero_if_reporting_raises(monkeypatch, capsys):
+    _wire_happy_path(monkeypatch, purchase_result=SETTLED)
+
+    def exploding_report(_settled):
+        raise RuntimeError("formatting blew up")
+
+    monkeypatch.setattr(run_module, "_report_settled", exploding_report)
+
+    exit_code = await run_module.run("buy a widget", 1000, CONFIG, assume_yes=True)
+    assert exit_code == 0  # money moved -- never BLOCKED past this point
 
 
 async def test_run_operator_types_yes_proceeds(monkeypatch, capsys):

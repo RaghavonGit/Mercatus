@@ -1,7 +1,7 @@
 import mcp.types as types
 import pytest
 
-from emptor.purchase import PendingPurchase, PurchaseError, purchase
+from emptor.purchase import PendingPurchase, PurchaseError, SettledPurchase, purchase
 from emptor.validate import validate_picks
 
 CATALOG = [
@@ -292,3 +292,69 @@ async def test_purchase_reads_payment_link_from_text_content_when_no_structured_
 
     assert pending.payment_link_id == "plink-txt"
     assert pending.payment_link_url == "https://rzp.io/i/txt"
+
+
+def _checkout_autopay_settled():
+    return _ok_result(
+        {"ok": True, "status": "paid", "amount": 100, "settled_via": "autopay"}
+    )
+
+
+async def test_purchase_returns_settled_purchase_when_shop_autopay_settles():
+    validated = validate_picks([{"product_id": "a", "quantity": 1}], CATALOG, budget_inr=1000)
+    session = _FakeSession({"add_to_cart": _add_ok(), "checkout": _checkout_autopay_settled()})
+
+    result = await purchase(session, validated)
+
+    assert isinstance(result, SettledPurchase)
+    assert result.settled_via == "autopay"
+    assert result.total_inr == validated.total_inr
+    assert result.amount_inr == 100
+
+
+async def test_purchase_settled_from_text_content_when_no_structured_content():
+    validated = validate_picks([{"product_id": "a", "quantity": 1}], CATALOG, budget_inr=1000)
+    checkout_result = types.CallToolResult(
+        content=[
+            types.TextContent(
+                type="text",
+                text='{"ok": true, "status": "paid", "amount": 100, "settled_via": "autopay"}',
+            )
+        ],
+        structured_content=None,
+        is_error=False,
+    )
+    session = _FakeSession({"add_to_cart": _add_ok(), "checkout": checkout_result})
+
+    result = await purchase(session, validated)
+    assert isinstance(result, SettledPurchase)
+    assert result.settled_via == "autopay"
+
+
+async def test_purchase_normal_pending_is_not_mistaken_for_settled():
+    validated = validate_picks([{"product_id": "a", "quantity": 1}], CATALOG, budget_inr=1000)
+    session = _FakeSession({"add_to_cart": _add_ok(), "checkout": _checkout_ok()})
+
+    result = await purchase(session, validated)
+    assert isinstance(result, PendingPurchase)
+
+
+async def test_purchase_autopay_fallback_still_returns_a_pending_link():
+    # Autopay declined -> shop fell back to a real link; that fallback cause
+    # is informational and must not stop Emptor from handling the link.
+    validated = validate_picks([{"product_id": "a", "quantity": 1}], CATALOG, budget_inr=1000)
+    checkout_result = _ok_result(
+        {
+            "ok": True,
+            "payment_link_id": "plink-fb",
+            "payment_link_url": "https://rzp.io/i/fb",
+            "status": "pending",
+            "expire_hours": 6,
+            "autopay_fallback_cause": "AUTOPAY_OVER_THRESHOLD",
+        }
+    )
+    session = _FakeSession({"add_to_cart": _add_ok(), "checkout": checkout_result})
+
+    result = await purchase(session, validated)
+    assert isinstance(result, PendingPurchase)
+    assert result.payment_link_id == "plink-fb"
