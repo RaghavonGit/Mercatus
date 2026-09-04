@@ -20,7 +20,7 @@ from emptor.config import LLMSettings
 from emptor.decide import DecideError, decide
 from emptor.discover import DiscoverError, discover_catalog
 from emptor.filters import pre_filter
-from emptor.purchase import PurchaseError, purchase
+from emptor.purchase import PurchaseError, SettledPurchase, purchase
 from emptor.validate import (
     MAX_DISTINCT_ITEMS,
     MAX_QTY_PER_ITEM,
@@ -194,6 +194,25 @@ async def run_pipeline(
                 pending = await purchase(session, validated)
             except PurchaseError as exc:
                 yield {"stage": "blocked", "at": "purchase", "reason": f"purchase failed: {exc}"}
+                return
+
+            if isinstance(pending, SettledPurchase):
+                # Mercator autopay: settled from a prepaid balance, no link
+                # to pay -- money has moved.
+                _safe_log(
+                    {
+                        "total_inr": pending.total_inr,
+                        "status": "paid",
+                        "settled_via": pending.settled_via,
+                    },
+                    "checkout_result",
+                )
+                yield {
+                    "stage": "settled",
+                    "settled_via": pending.settled_via,
+                    "amount": pending.total_inr,
+                    "status": "paid",
+                }
                 return
 
             _safe_log(

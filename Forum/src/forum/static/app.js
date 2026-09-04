@@ -152,6 +152,15 @@ function handleEvent(ev) {
       done("pending");
       showPayment(ev);
       break;
+    case "settled": {
+      const h = $('.timeline li[data-step="pending"] h4');
+      if (h) h.textContent = "Settled by autopay";
+      activate("pending");
+      detail("pending", `INR ${ev.amount} · drawn from the prepaid envelope — no link to pay`);
+      done("pending");
+      showSettled(ev);
+      break;
+    }
     case "blocked":
       markBlocked(mapStage(ev.at), ev.reason);
       break;
@@ -185,6 +194,9 @@ function resetRun() {
     const r = li.querySelector(".reason"); if (r) { r.hidden = true; r.textContent = ""; }
   }
   $("#payment-card").hidden = true;
+  $("#settled-card").hidden = true;
+  const h = $('.timeline li[data-step="pending"] h4');
+  if (h) h.textContent = "Payment link created";
   state.paymentId = null;
   stopPaymentPolling();
 }
@@ -211,6 +223,13 @@ function setBadge(status) {
   const b = $("#pay-badge");
   b.dataset.status = status;
   b.textContent = status.toUpperCase();
+}
+
+function showSettled(ev) {
+  $("#settled-card").hidden = false;
+  $("#settled-amount").textContent = "INR " + ev.amount;
+  $("#settled-via").textContent = ev.settled_via;
+  refreshSpend();
 }
 
 $("#pay-refresh").addEventListener("click", pollPaymentOnce);
