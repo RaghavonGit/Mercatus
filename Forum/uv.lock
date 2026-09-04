@@ -438,6 +438,7 @@ dependencies = [
     { name = "emptor" },
     { name = "fastapi" },
     { name = "fides" },
+    { name = "httpx" },
     { name = "mercator" },
     { name = "python-dotenv" },
     { name = "uvicorn", extra = ["standard"] },
@@ -445,7 +446,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "httpx" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
@@ -455,6 +455,7 @@ requires-dist = [
     { name = "emptor", editable = "../Emptor" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "fides", editable = "../Fides" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "mercator", editable = "../Mercator" },
     { name = "python-dotenv", specifier = ">=1.2.3" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34" },
@@ -462,7 +463,6 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "httpx", specifier = ">=0.28.1" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-asyncio", specifier = ">=1.4.0" },
 ]

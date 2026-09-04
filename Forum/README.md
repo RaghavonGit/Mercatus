@@ -11,6 +11,7 @@ you can *watch* it, instead of driving three terminals by hand. It shows:
   **PENDING → PAID** on its own once you pay it
 - both Fides ledgers (Emptor's and Mercator's), live, each with a
   "chain verified" indicator
+- a **plain-English recap** of the finished run, above the raw event feed
 - the durable spend tracker
 
 Forum is a **presentation layer, not a security boundary.** Every
@@ -86,6 +87,23 @@ rm -f Mercator/ledger.db Mercator/spend_tracker.db Forum/forum_ledger.db
 
 To skip the LLM, tick **Choose the item myself** and pick from the catalog —
 the pick still goes through the shop's validation and the same payment flow.
+
+### The run recap
+
+When a run finishes, the top of the ledger panel shows **what just happened
+in plain words**: a small fact box (goal, item, amount, how it settled,
+transaction reference, time, whether a human approved) built directly from
+the ledger fields, and a short narrative paragraph written by the same local
+`qwen2.5:7b-instruct` model reading the committed ledger entries. The figures
+and IDs come from code, not the model — an injected product name can only
+garble a sentence, never a number. **Show the raw ledger entries** expands the
+full hash-chained event list underneath. If Ollama isn't reachable the fact
+box still renders and the raw events auto-expand.
+
+This is the only place Forum calls a model besides the pipeline's one
+decision call — it reads already-committed data and its output is display
+only; it never re-enters validation or purchase. Mercator still makes zero
+LLM calls; Emptor still makes exactly one.
 
 ### Autopay
 
