@@ -82,7 +82,7 @@ def _display_checks(picks: list, affordable: list[dict], budget_inr: int) -> lis
         if isinstance(p, dict) and p.get("product_id") in prices
     )
     return [
-        {"name": f"every pick is a real in-budget catalog item", "ok": in_catalog},
+        {"name": "every pick is a real in-budget catalog item", "ok": in_catalog},
         {"name": f"quantities are 1..{MAX_QTY_PER_ITEM}", "ok": qtys_ok},
         {"name": f"at most {MAX_DISTINCT_ITEMS} distinct items, no duplicates", "ok": distinct_ok},
         {"name": f"cart total (INR {total}) is within budget (INR {budget_inr})", "ok": total <= budget_inr},

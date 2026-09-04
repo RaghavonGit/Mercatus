@@ -246,7 +246,6 @@ def _verify() -> int:
     import copy
     from unittest.mock import Mock
 
-    from mercator import guardrails
     from mercator.catalog import load_catalog
     from mercator.config import load_config
     from mercator.ledger import Ledger

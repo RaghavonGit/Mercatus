@@ -29,6 +29,7 @@
 **/.git.bak/
 
 # Internal AI-assistant build-diary docs (kept locally, not published)
+done.md
 Emptor/CLAUDE.md
 Emptor/Docu.md
 Emptor/finished_emptor.md
