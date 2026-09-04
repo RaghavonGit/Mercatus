@@ -10,7 +10,6 @@ Covers CLAUDE.md section 11 checklist items:
 - log_event() with empty actor or event_type -> raises clearly
 """
 
-import importlib
 import threading
 
 import pytest

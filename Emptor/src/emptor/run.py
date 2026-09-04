@@ -48,34 +48,12 @@ def _describe(exc: BaseException) -> str:
     return f"{type(current).__name__}: {current}"
 
 
-def _report_success(validated: ValidationResult, order_id: str) -> None:
-    """Print the success line.
-
-    Once purchase() has returned, the run has succeeded. Nothing here may turn
-    that into a reported failure, so any formatting/encoding problem falls back
-    to a minimal ASCII-safe message. Untrusted, shop-supplied text (product
-    names, the order id) is sanitized before printing.
-    """
-    try:
-        names = ", ".join(
-            f"{item.quantity}x {_safe(item.product['name'])}" for item in validated.items
-        )
-        print(f"SUCCESS: bought {names} for INR {validated.total_inr} (order {_safe(order_id)})")
-    except Exception:
-        # Masking is the intent here, not a risk: the requirement is to report
-        # success no matter what once money has moved.
-        try:
-            print(f"SUCCESS: order {_safe(order_id)}")
-        except Exception:
-            pass
-
-
 def _report_pending(pending: PendingPurchase) -> None:
     """Print the PENDING line: the checkout went through but the buyer still
-    has to pay the link, so no money has moved yet. Same rule as
-    _report_success -- once purchase() returned, this is not a failure, and
-    no formatting/encoding problem here may turn it into a BLOCKED. Shop-
-    supplied text (the link URL and id) is sanitized before printing."""
+    has to pay the link, so no money has moved yet. Once purchase() has
+    returned this is not a failure, and no formatting/encoding problem here
+    may turn it into a BLOCKED. Shop-supplied text (the link URL and id) is
+    sanitized before printing."""
     try:
         expiry = f", expires in ~{pending.expire_hours}h" if pending.expire_hours else ""
         print(
