@@ -7,8 +7,9 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.mcpserver.utilities.func_metadata import func_metadata
 
 import mercator.server as server_module
+from mercator import autopay_reasons
 from mercator.cart import CartStore
-from mercator.config import Config
+from mercator.config import AutopayConfig, Config
 from mercator.idempotency import IdempotencyStore
 from mercator.ledger import Ledger
 from mercator.server import (
@@ -110,6 +111,47 @@ CONFIG_WITH_CUMULATIVE_CAP = Config(
     payment_link_expire_hours=None,
     max_pending_payment_links=5,
 )
+
+
+AUTOPAY_CONFIG = Config(
+    razorpay_key_id="rzp_test_abc",
+    razorpay_key_secret="secret",
+    spend_cap_inr=100_000,
+    allowed_categories=["books", "toys", "stationery"],
+    port=8000,
+    razorpay_mode="test",
+    cumulative_spend_cap_inr=None,
+    cumulative_spend_window_hours=24,
+    payment_link_expire_hours=None,
+    max_pending_payment_links=5,
+    autopay=AutopayConfig(threshold_inr=800, allowed_categories=["books"], max_balance_inr=5000),
+)
+
+def make_toys_catalog():
+    # Fresh dicts every call -- do_checkout mutates "stock" in place.
+    return [
+        {"id": "prod_toy", "name": "Toy Car", "price_inr": 300, "in_stock": True,
+         "category": "toys", "stock": 9, "description": "Vroom.", "_flagged": False},
+    ]
+
+
+def ledger_entries(ledger):
+    """(event_type, data-dict) for every row, in seq order."""
+    import json
+
+    rows = ledger._ledger._store.get_all_entries()  # noqa: SLF001 - test introspection
+    return [(row["event_type"], json.loads(row["data"])) for row in rows]
+
+
+def autopay_result_entry(ledger):
+    for event_type, data in ledger_entries(ledger):
+        if event_type == "autopay_result":
+            return data
+    return None
+
+
+def server_module_ledger(server):
+    return server._ledger  # noqa: SLF001 - test introspection
 
 
 def paid_fetch(amount_inr):
@@ -386,6 +428,173 @@ async def test_checkout_payment_failure_returns_payment_failed(tmp_path):
     assert result.structured_content["ok"] is False
     assert result.structured_content["reason"] == "PAYMENT_FAILED"
     assert cart_id not in server._pending_links
+
+
+# --- autopay (the tiered-autonomy envelope) -----------------------------
+
+
+async def _autopay_checkout(server, product_id="prod_001", key="idem-1"):
+    add_result = await server.call_tool("add_to_cart", {"product_id": product_id, "quantity": 1})
+    cart_id = add_result.structured_content["cart_id"]
+    result = await server.call_tool("checkout", {"cart_id": cart_id, "idempotency_key": key})
+    return cart_id, result.structured_content
+
+
+@pytest.mark.asyncio
+async def test_autopay_settles_sub_threshold_purchase_with_no_gateway_call(tmp_path):
+    client = make_fake_razorpay_client()
+    server = make_server(tmp_path, razorpay_client=client, config=AUTOPAY_CONFIG)
+    server._spend_tracker.credit_balance(5000)
+
+    cart_id, body = await _autopay_checkout(server)  # prod_001, books, 450 < 800
+
+    assert body["ok"] is True
+    assert body["settled_via"] == "autopay"
+    assert body["status"] == "paid"
+    assert body["amount"] == 450
+    assert client.payment_link.create.call_count == 0
+    assert server._spend_tracker.autopay_balance() == 4550
+    assert cart_id not in server._pending_links
+
+    entry = autopay_result_entry(server_module_ledger(server))
+    assert entry["outcome"] == "autopay_settled"
+    assert entry["human_approval"] is False
+    assert entry["amount_inr"] == 450
+    assert entry["balance_after_inr"] == 4550
+
+
+@pytest.mark.asyncio
+async def test_autopay_over_threshold_falls_back_to_payment_link(tmp_path):
+    client = make_fake_razorpay_client()
+    server = make_server(tmp_path, razorpay_client=client, config=AUTOPAY_CONFIG)
+    server._spend_tracker.credit_balance(50_000)
+
+    cart_id, body = await _autopay_checkout(server, product_id="prod_over_cap")  # 9999 > 800
+
+    assert body["ok"] is True
+    assert body["payment_link_id"] == "plink_1"
+    assert body.get("settled_via") in (None, "manual")
+    assert body["autopay_fallback_cause"] == autopay_reasons.AUTOPAY_OVER_THRESHOLD
+    assert client.payment_link.create.call_count == 1
+    assert server._spend_tracker.autopay_balance() == 50_000
+    assert cart_id in server._pending_links
+
+    entry = autopay_result_entry(server_module_ledger(server))
+    assert entry["outcome"] == "fell_back_to_manual"
+    assert entry["fallback_cause"] == autopay_reasons.AUTOPAY_OVER_THRESHOLD
+
+
+@pytest.mark.asyncio
+async def test_autopay_insufficient_balance_falls_back_to_payment_link(tmp_path):
+    client = make_fake_razorpay_client()
+    server = make_server(tmp_path, razorpay_client=client, config=AUTOPAY_CONFIG)
+    server._spend_tracker.credit_balance(200)  # < 450
+
+    _, body = await _autopay_checkout(server)
+
+    assert body["ok"] is True
+    assert body["payment_link_id"] == "plink_1"
+    assert body["autopay_fallback_cause"] == autopay_reasons.AUTOPAY_BALANCE_INSUFFICIENT
+    assert client.payment_link.create.call_count == 1
+    assert server._spend_tracker.autopay_balance() == 200
+
+
+@pytest.mark.asyncio
+async def test_autopay_category_not_on_list_falls_back_to_payment_link(tmp_path):
+    client = make_fake_razorpay_client()
+    server = make_server(
+        tmp_path, catalog=make_toys_catalog(), razorpay_client=client, config=AUTOPAY_CONFIG
+    )
+    server._spend_tracker.credit_balance(5000)
+
+    _, body = await _autopay_checkout(server, product_id="prod_toy")  # toys not on autopay list
+
+    assert body["ok"] is True
+    assert body["payment_link_id"] == "plink_1"
+    assert body["autopay_fallback_cause"] == autopay_reasons.AUTOPAY_CATEGORY_NOT_ELIGIBLE
+    assert server._spend_tracker.autopay_balance() == 5000
+
+
+@pytest.mark.asyncio
+async def test_autopay_disabled_config_uses_normal_link_flow_and_logs_no_autopay_event(tmp_path):
+    client = make_fake_razorpay_client()
+    server = make_server(tmp_path, razorpay_client=client)  # TEST_CONFIG: autopay is None
+    server._spend_tracker.credit_balance(5000)
+
+    _, body = await _autopay_checkout(server)
+
+    assert body["ok"] is True
+    assert body["payment_link_id"] == "plink_1"
+    assert body.get("settled_via") in (None, "manual")
+    assert autopay_result_entry(server_module_ledger(server)) is None
+
+
+@pytest.mark.asyncio
+async def test_autopay_same_idempotency_key_debits_once(tmp_path):
+    client = make_fake_razorpay_client()
+    server = make_server(tmp_path, razorpay_client=client, config=AUTOPAY_CONFIG)
+    server._spend_tracker.credit_balance(5000)
+
+    add_result = await server.call_tool("add_to_cart", {"product_id": "prod_001", "quantity": 1})
+    cart_id = add_result.structured_content["cart_id"]
+    first = await server.call_tool("checkout", {"cart_id": cart_id, "idempotency_key": "idem-1"})
+    second = await server.call_tool("checkout", {"cart_id": cart_id, "idempotency_key": "idem-1"})
+
+    assert first.structured_content == second.structured_content
+    assert server._spend_tracker.autopay_balance() == 4550
+
+
+@pytest.mark.asyncio
+async def test_autopay_debit_counts_toward_cumulative_cap(tmp_path):
+    client = make_fake_razorpay_client()
+    config = Config(
+        razorpay_key_id="rzp_test_abc", razorpay_key_secret="secret", spend_cap_inr=100_000,
+        allowed_categories=["books", "toys", "stationery"], port=8000, razorpay_mode="test",
+        cumulative_spend_cap_inr=1000, cumulative_spend_window_hours=24,
+        payment_link_expire_hours=None, max_pending_payment_links=5,
+        autopay=AutopayConfig(threshold_inr=800, allowed_categories=["books"], max_balance_inr=5000),
+    )
+    server = make_server(tmp_path, razorpay_client=client, config=config)
+    server._spend_tracker.credit_balance(5000)
+
+    _, first = await _autopay_checkout(server, key="idem-1")  # 450, settles
+    assert first["settled_via"] == "autopay"
+    assert server._spend_tracker.sum_since(24) == 450
+
+    # 450 + 450 = 900 <= 1000 -> still settles
+    _, second = await _autopay_checkout(server, key="idem-2")
+    assert second["settled_via"] == "autopay"
+
+    # 900 + 450 = 1350 > 1000 -> hard block, before the autopay decision
+    _, third = await _autopay_checkout(server, key="idem-3")
+    assert third["ok"] is False
+    assert third["reason"] == "CUMULATIVE_SPEND_CAP_EXCEEDED"
+
+
+@pytest.mark.asyncio
+async def test_autopay_two_purchases_cannot_overdraw_the_envelope(tmp_path):
+    client = make_fake_razorpay_client()
+    server = make_server(tmp_path, razorpay_client=client, config=AUTOPAY_CONFIG)
+    server._spend_tracker.credit_balance(500)  # covers exactly one 450 purchase
+
+    _, first = await _autopay_checkout(server, key="idem-1")
+    _, second = await _autopay_checkout(server, key="idem-2")
+
+    settled = [b for b in (first, second) if b.get("settled_via") == "autopay"]
+    fellback = [b for b in (first, second) if b.get("payment_link_id")]
+    assert len(settled) == 1
+    assert len(fellback) == 1
+    assert fellback[0]["autopay_fallback_cause"] == autopay_reasons.AUTOPAY_BALANCE_INSUFFICIENT
+    assert server._spend_tracker.autopay_balance() == 50
+
+
+def test_checkout_autopay_shape_validates_against_declared_schema():
+    schema = _output_schema(CheckoutResult)
+    filled = _as_sdk_would_fill(
+        schema,
+        {"ok": True, "amount": 450, "status": "paid", "settled_via": "autopay"},
+    )
+    jsonschema.validate(filled, schema)
 
 
 # --- load_env: must not depend on the process CWD ------------------------

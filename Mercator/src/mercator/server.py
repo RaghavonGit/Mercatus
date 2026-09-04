@@ -23,7 +23,7 @@ from typing import TypedDict
 from dotenv import dotenv_values
 from mcp.server.mcpserver import MCPServer
 
-from mercator import guardrails, payments
+from mercator import autopay_reasons, guardrails, payments
 from mercator.cart import CartStore
 from mercator.cart import add_to_cart as _add_to_cart
 from mercator.catalog import load_catalog
@@ -91,6 +91,13 @@ class CheckoutResult(TypedDict, total=False):
     expire_hours: int | None
     reason: str | None
     detail: str | None
+    # Autopay (tiered-autonomy envelope). settled_via == "autopay" means the
+    # prepaid balance was drawn with no human click and no gateway call --
+    # status is already "paid". Absent/None on the human-paid link path.
+    # autopay_fallback_cause names why autopay was NOT taken (an
+    # autopay_reasons code); it never turns a success into a rejection.
+    settled_via: str | None
+    autopay_fallback_cause: str | None
 
 
 def _safe_log(ledger: Ledger, event_type: str, data: dict) -> None:
@@ -108,6 +115,24 @@ def _safe_log_checkout_result(ledger: Ledger, cart_id: str, idempotency_key: str
     # an already-completed purchase (CLAUDE.md section 2 rules 4 and 6).
     try:
         ledger.log_checkout_result(cart_id, idempotency_key, outcome)
+    except Exception:
+        pass
+
+
+def _safe_log_autopay_result(ledger: Ledger, cart_id: str, idempotency_key: str, **fields) -> None:
+    # The autopay debit may have already committed by this point -- same
+    # rule as _safe_log_checkout_result: a broken ledger callback must never
+    # propagate past this call and defeat the idempotency guarantee for an
+    # already-completed autonomous purchase.
+    autopay = fields.pop("autopay")
+    try:
+        ledger.log_autopay_result(
+            cart_id,
+            idempotency_key,
+            autopay_threshold_inr=autopay.threshold_inr,
+            autopay_allowed_categories=autopay.allowed_categories,
+            **fields,
+        )
     except Exception:
         pass
 
@@ -261,18 +286,23 @@ def build_server(
             total = 0
 
             # One critical section: read live stock -> run guardrails ->
-            # check max-pending -> check cumulative cap -> commit the
-            # reservation. Splitting the lock between any of these would let
-            # two concurrent checkouts both clear a check the other's
-            # in-flight reservation should have failed. The plan's ordered
-            # steps are logical precedence, not lock boundaries.
+            # cumulative cap -> autopay decision (+ its durable debit) ->
+            # max-pending -> commit the reservation. Splitting the lock
+            # between any of these would let two concurrent checkouts both
+            # clear a check the other's in-flight reservation should have
+            # failed. The plan's ordered steps are logical precedence, not
+            # lock boundaries.
+            rejection: dict | None = None
+            autopay_settled = None  # spend_tracker.AutopayDebitResult once it lands
+            autopay_fallback_cause: str | None = None
+            stock_reserved = False
+
             with stock_lock:
                 live_cart = _with_live_stock(cart, catalog_by_id)
                 guard_result = guardrails.run_all_guardrails(
                     live_cart, idempotency_key, guard_config, log_fn=ledger.log_guardrail_check
                 )
 
-                rejection: dict | None = None
                 if not guard_result.passed:
                     rejection = {
                         "ok": False,
@@ -282,18 +312,11 @@ def build_server(
                 else:
                     total = sum(item["price_inr"] * item["quantity"] for item in cart["items"])
 
-                    with pending_lock:
-                        pending_count = len(pending_links)
-                    if pending_count >= config.max_pending_payment_links:
-                        rejection = {
-                            "ok": False,
-                            "reason": TOO_MANY_PENDING_PAYMENT_LINKS,
-                            "detail": (
-                                f"{pending_count} payment links already awaiting payment "
-                                f"(max {config.max_pending_payment_links})"
-                            ),
-                        }
-                    elif config.cumulative_spend_cap_inr is not None:
+                    # Cumulative cap is a hard ceiling on money out the door
+                    # regardless of settlement path, so it is proven before
+                    # the path is chosen. sum_since() already counts autopay
+                    # debits alongside paid links.
+                    if config.cumulative_spend_cap_inr is not None:
                         already_spent = spend_tracker.sum_since(config.cumulative_spend_window_hours)
                         cumulative = guardrails.check_cumulative_spend_cap(
                             already_spent, total, config.cumulative_spend_cap_inr
@@ -305,8 +328,55 @@ def build_server(
                                 "detail": cumulative.detail,
                             }
 
-                if rejection is None:
-                    _adjust_stock(cart, catalog_by_id, -1)
+                # Autopay: may this checkout settle by drawing the prepaid
+                # envelope instead of minting a human-paid link? Never widens
+                # what the six guardrails permit -- they gated above.
+                if rejection is None and config.autopay is not None:
+                    categories = [item.get("category") for item in cart["items"]]
+                    eligibility = guardrails.check_autopay_eligible(
+                        total, categories, config.autopay
+                    )
+                    if not eligibility.eligible:
+                        autopay_fallback_cause = eligibility.fallback_cause
+                    else:
+                        # Reserve stock (reversible) before the durable debit.
+                        _adjust_stock(cart, catalog_by_id, -1)
+                        stock_reserved = True
+                        try:
+                            debit = spend_tracker.try_autopay_debit(idempotency_key, total)
+                        except Exception:  # noqa: BLE001 - fail closed to the human path
+                            debit = None
+                            autopay_fallback_cause = autopay_reasons.AUTOPAY_INTERNAL_ERROR
+                        if debit is not None and debit.status in ("committed", "replayed"):
+                            autopay_settled = debit
+                        else:
+                            # Insufficient balance or an internal error --
+                            # release the reservation, fall back to a link.
+                            _adjust_stock(cart, catalog_by_id, 1)
+                            stock_reserved = False
+                            if debit is not None:
+                                autopay_fallback_cause = (
+                                    autopay_reasons.AUTOPAY_BALANCE_INSUFFICIENT
+                                )
+
+                # Human-paid link path: the max-pending cap only concerns
+                # pending links, which autopay never creates -- so it is
+                # checked here, after the autopay decision.
+                if rejection is None and autopay_settled is None:
+                    with pending_lock:
+                        pending_count = len(pending_links)
+                    if pending_count >= config.max_pending_payment_links:
+                        rejection = {
+                            "ok": False,
+                            "reason": TOO_MANY_PENDING_PAYMENT_LINKS,
+                            "detail": (
+                                f"{pending_count} payment links already awaiting payment "
+                                f"(max {config.max_pending_payment_links})"
+                            ),
+                        }
+                    else:
+                        _adjust_stock(cart, catalog_by_id, -1)
+                        stock_reserved = True
 
             if rejection is not None:
                 if cart is not None:
@@ -314,15 +384,50 @@ def build_server(
                 _safe_log_checkout_result(ledger, cart_id, idempotency_key, rejection)
                 return rejection
 
-            # All checks passed, stock is reserved. The Razorpay call
-            # itself happens outside stock_lock so one slow payment doesn't
+            if autopay_settled is not None:
+                # Money already moved -- the envelope was drawn, no gateway
+                # call, no human click. This cart_id is terminally resolved.
+                outcome = {
+                    "ok": True,
+                    "status": "paid",
+                    "amount": autopay_settled.amount_inr,
+                    "settled_via": "autopay",
+                }
+                cart_store.complete_checkout(cart_id)
+                _safe_log_autopay_result(
+                    ledger,
+                    cart_id,
+                    idempotency_key,
+                    outcome="autopay_settled",
+                    amount_inr=autopay_settled.amount_inr,
+                    autopay=config.autopay,
+                    balance_before_inr=autopay_settled.balance_before_inr,
+                    balance_after_inr=autopay_settled.balance_after_inr,
+                )
+                _safe_log_checkout_result(ledger, cart_id, idempotency_key, outcome)
+                return outcome
+
+            # Human-paid link path. Stock is reserved. The Razorpay call
+            # happens outside stock_lock so one slow payment doesn't
             # serialize every other checkout.
+            if config.autopay is not None:
+                _safe_log_autopay_result(
+                    ledger,
+                    cart_id,
+                    idempotency_key,
+                    outcome="fell_back_to_manual",
+                    amount_inr=total,
+                    autopay=config.autopay,
+                    fallback_cause=autopay_fallback_cause,
+                )
             expire_hours = config.payment_link_expire_hours or DEFAULT_PAYMENT_LINK_EXPIRE_HOURS
             outcome = payments.create_payment_link(razorpay_client, total, cart_id, expire_hours)
             if outcome.get("ok"):
                 # Surface the window so a client (Emptor) can tell the buyer
                 # how long they have -- it has no other way to know it.
                 outcome["expire_hours"] = expire_hours
+                if autopay_fallback_cause is not None:
+                    outcome["autopay_fallback_cause"] = autopay_fallback_cause
                 with pending_lock:
                     pending_links[cart_id] = {
                         "payment_link_id": outcome["payment_link_id"],
@@ -339,8 +444,9 @@ def build_server(
                 # Link creation failed after the reservation was committed --
                 # release it so the item isn't phantom-sold, and let the cart
                 # be retried under a different idempotency key.
-                with stock_lock:
-                    _adjust_stock(cart, catalog_by_id, 1)
+                if stock_reserved:
+                    with stock_lock:
+                        _adjust_stock(cart, catalog_by_id, 1)
                 cart_store.abort_checkout(cart_id)
             _safe_log_checkout_result(ledger, cart_id, idempotency_key, outcome)
             return outcome
@@ -428,6 +534,7 @@ def build_server(
     server._pending_links = pending_links
     server._spend_tracker = spend_tracker
     server._catalog_by_id = catalog_by_id
+    server._ledger = ledger
 
     return server
 
