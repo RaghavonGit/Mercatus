@@ -1,6 +1,6 @@
 import pytest
 
-from mercator.config import ConfigError, load_config
+from mercator.config import AutopayConfig, ConfigError, load_config
 
 VALID_ENV = {
     "RAZORPAY_KEY_ID": "rzp_test_abc123",
@@ -283,3 +283,105 @@ def test_load_config_max_pending_payment_links_negative_raises():
 def test_load_config_max_pending_payment_links_defaults_to_5_in_live_mode():
     config = load_config(env(**LIVE_OVERRIDES))
     assert config.max_pending_payment_links == 5
+
+
+# --- autopay (the tiered-autonomy envelope) --------------------------------
+
+# A valid AUTOPAY_ENABLED=true env: threshold strictly under SPEND_CAP_INR
+# (1500), categories a subset of ALLOWED_CATEGORIES (books,toys,stationery).
+AUTOPAY_ON = {
+    "AUTOPAY_ENABLED": "true",
+    "AUTOPAY_THRESHOLD_INR": "800",
+    "AUTOPAY_ALLOWED_CATEGORIES": "books,stationery",
+    "AUTOPAY_MAX_BALANCE_INR": "5000",
+}
+
+
+def test_load_config_autopay_unset_is_none():
+    assert load_config(env()).autopay is None
+
+
+def test_load_config_autopay_disabled_is_none():
+    assert load_config(env(AUTOPAY_ENABLED="false")).autopay is None
+
+
+def test_load_config_autopay_enabled_returns_autopay_config():
+    config = load_config(env(**AUTOPAY_ON))
+    assert isinstance(config.autopay, AutopayConfig)
+    assert config.autopay.threshold_inr == 800
+    assert config.autopay.allowed_categories == ["books", "stationery"]
+    assert config.autopay.max_balance_inr == 5000
+
+
+@pytest.mark.parametrize("bad", ["yes", "1", "True", "FALSE", "on", "enabled"])
+def test_load_config_autopay_enabled_unparseable_raises(bad):
+    with pytest.raises(ConfigError):
+        load_config(env(AUTOPAY_ENABLED=bad))
+
+
+def test_load_config_autopay_enabled_missing_threshold_raises():
+    e = env(**AUTOPAY_ON)
+    del e["AUTOPAY_THRESHOLD_INR"]
+    with pytest.raises(ConfigError):
+        load_config(e)
+
+
+@pytest.mark.parametrize("bad", ["not-a-number", "0", "-100"])
+def test_load_config_autopay_threshold_invalid_raises(bad):
+    with pytest.raises(ConfigError):
+        load_config(env(**{**AUTOPAY_ON, "AUTOPAY_THRESHOLD_INR": bad}))
+
+
+def test_load_config_autopay_threshold_equal_to_spend_cap_raises():
+    with pytest.raises(ConfigError):
+        load_config(env(**{**AUTOPAY_ON, "AUTOPAY_THRESHOLD_INR": "1500"}))
+
+
+def test_load_config_autopay_threshold_above_spend_cap_raises():
+    with pytest.raises(ConfigError):
+        load_config(env(**{**AUTOPAY_ON, "AUTOPAY_THRESHOLD_INR": "2000"}))
+
+
+def test_load_config_autopay_enabled_missing_categories_raises():
+    e = env(**AUTOPAY_ON)
+    del e["AUTOPAY_ALLOWED_CATEGORIES"]
+    with pytest.raises(ConfigError):
+        load_config(e)
+
+
+def test_load_config_autopay_empty_categories_raises():
+    with pytest.raises(ConfigError):
+        load_config(env(**{**AUTOPAY_ON, "AUTOPAY_ALLOWED_CATEGORIES": ""}))
+
+
+def test_load_config_autopay_categories_not_a_subset_raises():
+    with pytest.raises(ConfigError):
+        load_config(env(**{**AUTOPAY_ON, "AUTOPAY_ALLOWED_CATEGORIES": "books,electronics"}))
+
+
+def test_load_config_autopay_categories_empty_main_allowlist_raises():
+    with pytest.raises(ConfigError):
+        load_config(env(**{**AUTOPAY_ON, "ALLOWED_CATEGORIES": ""}))
+
+
+def test_load_config_autopay_categories_strips_whitespace():
+    config = load_config(env(**{**AUTOPAY_ON, "AUTOPAY_ALLOWED_CATEGORIES": " books , toys ,,"}))
+    assert config.autopay.allowed_categories == ["books", "toys"]
+
+
+def test_load_config_autopay_enabled_missing_max_balance_raises():
+    e = env(**AUTOPAY_ON)
+    del e["AUTOPAY_MAX_BALANCE_INR"]
+    with pytest.raises(ConfigError):
+        load_config(e)
+
+
+@pytest.mark.parametrize("bad", ["not-a-number", "0", "-1"])
+def test_load_config_autopay_max_balance_invalid_raises(bad):
+    with pytest.raises(ConfigError):
+        load_config(env(**{**AUTOPAY_ON, "AUTOPAY_MAX_BALANCE_INR": bad}))
+
+
+def test_load_config_autopay_enabled_in_live_mode():
+    config = load_config(env(**LIVE_OVERRIDES, **AUTOPAY_ON))
+    assert isinstance(config.autopay, AutopayConfig)
