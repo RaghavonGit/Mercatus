@@ -22,10 +22,12 @@ def cart_item_from_product(product: dict, quantity: int = 1) -> dict:
         "in_stock": product["in_stock"],
         "stock": product["stock"],
     }
-from mercator import guardrails
+from mercator import autopay_reasons, guardrails
+from mercator.config import AutopayConfig
 from mercator.guardrails import (
     GuardrailResult,
     check_allowlist,
+    check_autopay_eligible,
     check_cart_exists,
     check_cumulative_spend_cap,
     check_idempotency_key_present,
@@ -559,3 +561,74 @@ def test_check_cumulative_spend_cap_detail_states_sum_and_cap():
     assert result.passed is False
     assert "1600" in (result.detail or "")
     assert "1500" in (result.detail or "")
+
+
+# --- check_autopay_eligible (the tiered-autonomy envelope gate) ------------
+
+AUTOPAY = AutopayConfig(threshold_inr=800, allowed_categories=["books", "stationery"], max_balance_inr=5000)
+
+
+def test_autopay_eligible_single_item_under_threshold_on_list():
+    result = check_autopay_eligible(300, ["books"], AUTOPAY)
+    assert result.eligible is True
+    assert result.fallback_cause is None
+
+
+def test_autopay_eligible_exactly_at_threshold():
+    result = check_autopay_eligible(800, ["books"], AUTOPAY)
+    assert result.eligible is True
+
+
+def test_autopay_not_eligible_over_threshold():
+    result = check_autopay_eligible(801, ["books"], AUTOPAY)
+    assert result.eligible is False
+    assert result.fallback_cause == autopay_reasons.AUTOPAY_OVER_THRESHOLD
+
+
+def test_autopay_not_eligible_category_not_on_autopay_list():
+    result = check_autopay_eligible(300, ["toys"], AUTOPAY)
+    assert result.eligible is False
+    assert result.fallback_cause == autopay_reasons.AUTOPAY_CATEGORY_NOT_ELIGIBLE
+
+
+def test_autopay_not_eligible_multi_item_cart():
+    result = check_autopay_eligible(300, ["books", "stationery"], AUTOPAY)
+    assert result.eligible is False
+    assert result.fallback_cause == autopay_reasons.AUTOPAY_MULTI_ITEM
+
+
+def test_autopay_not_eligible_empty_categories():
+    result = check_autopay_eligible(0, [], AUTOPAY)
+    assert result.eligible is False
+
+
+def test_autopay_not_eligible_when_config_is_none():
+    result = check_autopay_eligible(300, ["books"], None)
+    assert result.eligible is False
+    assert result.fallback_cause == autopay_reasons.AUTOPAY_DISABLED
+
+
+@pytest.mark.parametrize("bad_total", [4.5, -1, True, "300", None])
+def test_autopay_not_eligible_malformed_total_fails_closed(bad_total):
+    result = check_autopay_eligible(bad_total, ["books"], AUTOPAY)
+    assert result.eligible is False
+    assert result.fallback_cause == autopay_reasons.AUTOPAY_INTERNAL_ERROR
+
+
+@pytest.mark.parametrize("bad_threshold", [0, -100, 4.5, True, None])
+def test_autopay_not_eligible_malformed_threshold_fails_closed(bad_threshold):
+    cfg = AutopayConfig(threshold_inr=bad_threshold, allowed_categories=["books"], max_balance_inr=5000)
+    result = check_autopay_eligible(300, ["books"], cfg)
+    assert result.eligible is False
+
+
+def test_autopay_eligible_multi_quantity_single_line_still_eligible():
+    # one line item (one category), quantity 2, total 600 <= 800
+    result = check_autopay_eligible(600, ["books"], AUTOPAY)
+    assert result.eligible is True
+
+
+def test_autopay_multi_item_checked_before_threshold():
+    # both wrong; structural cause wins
+    result = check_autopay_eligible(5000, ["books", "books"], AUTOPAY)
+    assert result.fallback_cause == autopay_reasons.AUTOPAY_MULTI_ITEM
