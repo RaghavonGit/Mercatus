@@ -10,7 +10,7 @@ per-item fields they are handed.
 from dataclasses import dataclass
 from typing import Callable
 
-from mercator import reasons
+from mercator import autopay_reasons, reasons
 from mercator.limits import MAX_ID_LENGTH
 
 
@@ -19,6 +19,56 @@ class GuardrailResult:
     passed: bool
     reason: str | None = None
     detail: str | None = None
+
+
+@dataclass
+class AutopayEligibility:
+    """Result of ``check_autopay_eligible``. Deliberately NOT a
+    ``GuardrailResult``: "not eligible" is not a checkout rejection, it means
+    fall back to the human Payment Link path. ``fallback_cause`` is an
+    ``autopay_reasons`` code, for the ledger."""
+
+    eligible: bool
+    fallback_cause: str | None = None
+
+
+def _positive_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def check_autopay_eligible(cart_total_inr, categories, autopay) -> AutopayEligibility:
+    """Pure decision: may this checkout settle by drawing the prepaid
+    envelope instead of minting a human-paid link? Runs AFTER all six
+    guardrails and the cumulative cap have passed. Fails closed toward the
+    human path on anything unexpected -- never toward autonomous charging.
+
+    ``autopay`` is a ``config.AutopayConfig`` or ``None`` (feature off).
+    """
+    if autopay is None:
+        return AutopayEligibility(False, autopay_reasons.AUTOPAY_DISABLED)
+
+    # Fail closed on a malformed config or total rather than trusting either.
+    if not _positive_int(getattr(autopay, "threshold_inr", None)):
+        return AutopayEligibility(False, autopay_reasons.AUTOPAY_INTERNAL_ERROR)
+    if (
+        not isinstance(cart_total_inr, int)
+        or isinstance(cart_total_inr, bool)
+        or cart_total_inr < 0
+    ):
+        return AutopayEligibility(False, autopay_reasons.AUTOPAY_INTERNAL_ERROR)
+
+    # v1: autopay is single-line-item only. A multi-item cart -> human path.
+    if not isinstance(categories, list) or len(categories) != 1:
+        return AutopayEligibility(False, autopay_reasons.AUTOPAY_MULTI_ITEM)
+
+    if cart_total_inr > autopay.threshold_inr:
+        return AutopayEligibility(False, autopay_reasons.AUTOPAY_OVER_THRESHOLD)
+
+    allowed = set(autopay.allowed_categories or [])
+    if any(category not in allowed for category in categories):
+        return AutopayEligibility(False, autopay_reasons.AUTOPAY_CATEGORY_NOT_ELIGIBLE)
+
+    return AutopayEligibility(True)
 
 
 def check_spend_cap(cart_total_inr: int, cap_inr: int) -> GuardrailResult:
