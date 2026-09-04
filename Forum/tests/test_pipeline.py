@@ -4,7 +4,7 @@ no real LLM."""
 
 from emptor.config import LLMSettings
 from emptor.decide import DecideError, DecideResult
-from emptor.purchase import PendingPurchase, PurchaseError
+from emptor.purchase import PendingPurchase, PurchaseError, SettledPurchase
 import forum.pipeline as pipe
 
 LLM = LLMSettings(base_url="http://llm.test/v1", model="m", fallback_model="m2", api_key=None)
@@ -18,6 +18,7 @@ PENDING = PendingPurchase(
     total_inr=450,
     expire_hours=6,
 )
+SETTLED = SettledPurchase(total_inr=450, settled_via="autopay", amount_inr=450)
 
 
 class _FakeConn:
@@ -74,6 +75,20 @@ async def test_happy_path_stage_sequence_and_reasoning(monkeypatch):
     assert all(c["ok"] for c in validation["checks"])
     pending = next(e for e in events if e["stage"] == "pending")
     assert pending["payment_link_url"] == "https://rzp.io/i/plink_1"
+
+
+async def test_autopay_settled_emits_a_settled_stage(monkeypatch):
+    _wire(monkeypatch, purchase_result=SETTLED)
+    events = await _collect(pipe.run_pipeline("a fantasy novel", 800, "http://x/mcp", LLM))
+    stages = [e["stage"] for e in events]
+    assert stages == [
+        "start", "connected", "catalog", "deciding", "decision", "validation", "settled", "done"
+    ]
+    settled = next(e for e in events if e["stage"] == "settled")
+    assert settled["settled_via"] == "autopay"
+    assert settled["amount"] == 450
+    assert settled["status"] == "paid"
+    assert "pending" not in stages
 
 
 async def test_manual_override_skips_the_llm(monkeypatch):

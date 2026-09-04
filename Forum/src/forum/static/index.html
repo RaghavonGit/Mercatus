@@ -63,6 +63,16 @@
         <p class="pay-meta" id="pay-meta"></p>
       </div>
 
+      <div class="card payment-card" id="settled-card" hidden>
+        <div class="pay-head">
+          <span class="badge" data-status="paid">PAID</span>
+          <span class="pay-amount" id="settled-amount"></span>
+        </div>
+        <p class="pay-sub">Settled by <b id="settled-via"></b> &mdash; Mercator drew a
+          prepaid balance it holds. No human click, no payment link, no gateway
+          call. Money has already moved.</p>
+      </div>
+
       <div class="card spend-card">
         <div class="spend-head"><span>Confirmed spend, last <b id="spend-window">24</b>h</span><span id="spend-figure">&mdash;</span></div>
         <div class="spend-bar"><div class="spend-fill" id="spend-fill"></div></div>

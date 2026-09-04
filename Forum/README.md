@@ -72,6 +72,16 @@ rm -f Mercator/ledger.db Mercator/spend_tracker.db Forum/forum_ledger.db
 To skip the LLM, tick **Choose the item myself** and pick from the catalog —
 the pick still goes through the shop's validation and the same payment flow.
 
+### Autopay
+
+If Mercator has autopay enabled (`AUTOPAY_ENABLED=true`, and its envelope
+funded via `mercator-topup`), a small purchase in an autopay-eligible
+category settles with **no payment link**: the final timeline step reads
+*"Settled by autopay"*, a **PAID** card appears instead of the Pay-now card,
+and the spend gauge ticks up immediately — Mercator drew a prepaid balance
+it holds, no human click. Everything above the threshold or off the stricter
+list still creates a normal payment link.
+
 ## Known limitations
 
 - **Test mode only.** Forum refuses to start if `RAZORPAY_MODE` isn't
