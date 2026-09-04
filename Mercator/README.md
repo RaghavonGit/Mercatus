@@ -12,7 +12,7 @@ Zero LLM calls. Every guardrail is deterministic, server-side, fail-closed.
 All core modules are built and tested: guardrails, idempotency, catalog
 sanitization, cart, config, payments, the durable spend tracker, ledger,
 and the MCP server itself (three tools: `list_products`, `add_to_cart`,
-`checkout`) plus the in-process payment-link reconciler. 338 tests passing.
+`checkout`) plus the in-process payment-link reconciler. 437 tests passing.
 
 - **Real-money path (Payment Links)**: `checkout` now creates a Razorpay
   **Payment Link** the buyer pays themselves in a browser — no
@@ -34,6 +34,14 @@ and the MCP server itself (three tools: `list_products`, `add_to_cart`,
   real stdio subprocess racing two genuine concurrent checkout calls.
 - **End-to-end with the real Emptor agent**: run and verified live — see
   below.
+- **Autopay (tiered-autonomy envelope)**: an opt-in second checkout path.
+  A sub-threshold purchase in a stricter allowlisted category is settled by
+  drawing a **prepaid balance** — no human click, no gateway call — while
+  everything else falls back to the human-paid Payment Link. Live
+  test-mode verified: a real ₹1000 top-up via a hosted link, then a ₹450
+  purchase settled from the envelope with zero Razorpay calls, a ₹1200
+  purchase correctly fell back to a link, chain stayed valid. See
+  `## Autopay` below and `CLAUDE.md` §15.
 
 Full history and reasoning for all of the above lives in `CLAUDE.md`
 section 15 (decision log) and section 16 (build status table).
@@ -83,6 +91,40 @@ open link on the Razorpay account, not only ones this deployment created.
 
 Going live forces every real bound to be set deliberately — no falling
 back to a test-mode default.
+
+| Env var | Meaning | Default |
+|---|---|---|
+| `AUTOPAY_ENABLED` | `true` turns on the envelope path; anything other than exact `true`/`false` is a startup failure | `false` |
+| `AUTOPAY_THRESHOLD_INR` | a purchase at or under this settles from the envelope (if also category-eligible and single-item). **Must be strictly below `SPEND_CAP_INR`** | required when enabled |
+| `AUTOPAY_ALLOWED_CATEGORIES` | comma list; **must be a subset of `ALLOWED_CATEGORIES`** — autopay is always a tightening | required when enabled |
+| `AUTOPAY_MAX_BALANCE_INR` | ceiling `mercator-topup` will not let the envelope balance exceed | required when enabled |
+
+## Autopay
+
+A second, opt-in checkout path. When `AUTOPAY_ENABLED=true`, a `checkout`
+whose total is **≤ `AUTOPAY_THRESHOLD_INR`**, whose single line item's
+category is on **`AUTOPAY_ALLOWED_CATEGORIES`**, is settled by decrementing
+a **prepaid rupee balance** held in `spend_tracker.db` — no human click,
+no Razorpay call, `status` is already `paid`. Anything else — over
+threshold, off the stricter list, multi-item, insufficient balance, any
+error — **falls back to the normal human-paid Payment Link** (still
+`ok: true`, with an `autopay_fallback_cause`). Autopay never rejects a
+checkout that the six guardrails allowed.
+
+Fund the envelope once, in advance, outside the agent flow:
+
+```bash
+uv run mercator-topup 1000        # mints a hosted link, waits for you to pay it, then credits ₹1000
+uv run mercator-topup 1000 --skip-payment   # credit directly (assumes an out-of-band payment)
+```
+
+The balance is bounded by `AUTOPAY_MAX_BALANCE_INR`; a top-up is money
+*in* and never counts toward `CUMULATIVE_SPEND_CAP_INR`, but an autopay
+*debit* does (it is money out the door exactly like a paid link).
+
+Every autopay decision writes an `autopay_result` ledger event with an
+explicit `human_approval: false` field and a snapshot of the threshold /
+allowlist that applied.
 
 **Transport**: defaults to **stdio** (what Claude Desktop, the MCP
 Inspector, and this project's own client tests use). To serve over HTTP
@@ -153,5 +195,9 @@ passthrough to Fides) to confirm the chain hasn't been tampered with.
   bounded separately, by `MAX_PENDING_PAYMENT_LINKS` — worst case is roughly
   `MAX_PENDING_PAYMENT_LINKS × CUMULATIVE_SPEND_CAP_INR` until links resolve.
 - Reconciliation is **poll-only** — no Razorpay webhooks.
+- **Autopay top-up is poll-in-the-CLI**, not reconciler-backed: if you kill
+  `mercator-topup` before the link is paid, the credit is lost (the money
+  still reached the merchant account — recoverable by hand). A production
+  shape would track pending top-ups durably.
 - The legacy `create_order` path has no capture simulation (and is no
   longer wired into `checkout`).
